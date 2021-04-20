@@ -37,8 +37,19 @@ function sortable_version { echo "$@" | awk -F. '{ printf("%d%03d%03d%03d\n", $1
 
 at_least_required_version() { # params: required actual
   local sortable_required=$(sortable_version $1)
+  sortable_required=$(echo $sortable_required | sed 's/^0*//') # remove preceding zeroes, which bash later interprets as octal or screwy
   local sortable_actual=$(sortable_version $2)
+  sortable_actual=$(echo $sortable_actual | sed 's/^0*//')
   [[ "$sortable_actual" -ge "$sortable_required" ]]
+}
+
+apt_not_installed() {
+  for x in "$@"; do
+    if ! dpkg -l "$x" | grep -q '^.i'; then
+      need_install="$need_install $x"
+    fi
+  done
+  echo "$need_install"
 }
 
 check_missing_packages () {
@@ -48,7 +59,7 @@ check_missing_packages () {
     VENDOR="redhat"
   fi
   # zeranoe's build scripts use wget, though we don't here...
-  local check_packages=('curl' 'pkg-config' 'make' 'git' 'svn' 'gcc' 'autoconf' 'automake' 'yasm' 'cvs' 'flex' 'bison' 'makeinfo' 'g++' 'ed' 'hg' 'pax' 'unzip' 'patch' 'wget' 'xz' 'nasm' 'gperf' 'autogen' 'bzip2')
+  local check_packages=('ragel' 'curl' 'pkg-config' 'make' 'git' 'svn' 'gcc' 'autoconf' 'automake' 'yasm' 'cvs' 'flex' 'bison' 'makeinfo' 'g++' 'ed' 'pax' 'unzip' 'patch' 'wget' 'xz' 'nasm' 'gperf' 'autogen' 'bzip2' 'realpath' 'meson' 'clang' 'python')
   # autoconf-archive is just for leptonica FWIW
   # I'm not actually sure if VENDOR being set to centos is a thing or not. On all the centos boxes I can test on it's not been set at all.
   # that being said, if it where set I would imagine it would be set to centos... And this contition will satisfy the "Is not initially set"
@@ -71,23 +82,62 @@ check_missing_packages () {
   fi
   if [[ -n "${missing_packages[@]}" ]]; then
     clear
-    echo "Could not find the following execs (svn is actually package subversion, makeinfo is actually package texinfo, hg is actually package mercurial if you're missing them): ${missing_packages[*]}"
+    echo "Could not find the following execs (svn is actually package subversion, makeinfo is actually package texinfo if you're missing them): ${missing_packages[*]}"
     echo 'Install the missing packages before running this script.'
     determine_distro
-    if [[ $DISTRO == "Ubuntu" ]]; then
-      echo -n "for ubuntu: $ sudo apt-get install subversion curl texinfo g++ bison flex cvs yasm automake libtool autoconf gcc cmake git make pkg-config zlib1g-dev mercurial unzip pax nasm gperf autogen bzip2 autoconf-archive p7zip-full"
-      if at_least_required_version "18.04" "$(lsb_release -rs)"; then
-        echo -n " python3-distutils" # guess it's no longer built-in, lensfun requires it...
-      fi
-      echo " -y"
-    else
-      echo "for gentoo (a non ubuntu distro): same as above, but no g++, no gcc, git is dev-vcs/git, zlib1g-dev is zlib, pkg-config is dev-util/pkgconfig, add ed..."
-      echo "for OS X (homebrew): brew install wget cvs hg yasm autogen automake autoconf cmake libtool xz pkg-config nasm bzip2 autoconf-archive p7zip"
-      echo "for debian: same as ubuntu, but also add libtool-bin and ed"
-      echo "for RHEL/CentOS: First ensure you have epel repos available, then run $ sudo yum install subversion texinfo mercurial libtool autogen gperf nasm patch unzip pax ed gcc-c++ bison flex yasm automake autoconf gcc zlib-devel cvs bzip2 cmake3 -y"
-      echo "for fedora: if your distribution comes with a modern version of cmake then use the same as RHEL/CentOS but replace cmake3 with cmake."
-      echo "for linux native: libva-dev"
-    fi
+
+    apt_pkgs='subversion ragel curl texinfo g++ bison flex cvs yasm automake libtool autoconf gcc cmake git make pkg-config zlib1g-dev unzip pax nasm gperf autogen bzip2 autoconf-archive p7zip-full meson clang'
+
+    [[ $DISTRO == "debian" ]] && apt_pkgs="$apt_pkgs libtool-bin ed"
+    case "$DISTRO" in
+      Ubuntu)
+        echo "for ubuntu:"
+        echo "$ sudo apt-get update"
+        ubuntu_ver="$(lsb_release -rs)"
+        if at_least_required_version "18.04" "$ubuntu_ver"; then
+          apt_pkgs="$apt_pkgs python3-distutils" # guess it's no longer built-in, lensfun requires it...
+        fi
+        if at_least_required_version "20.04" "$ubuntu_ver"; then
+          apt_pkgs="$apt_pkgs python-is-python3" # needed
+        fi
+        echo "$ sudo apt-get install $apt_pkgs -y"
+        ;;
+      debian)
+        echo "for debian:"
+        echo "$ sudo apt-get update"
+        # Debian version is always encoded in the /etc/debian_version
+        # This file is deployed via the base-files package which is the essential one - deployed in all installations.
+        # See their content for individual debian releases - https://sources.debian.org/src/base-files/
+        # Stable releases contain a version number.
+        # Testing/Unstable releases contain a textual codename description (e.g. bullseye/sid)
+        #
+        deb_ver="$(cat /etc/debian_version)"
+        # Upcoming codenames taken from https://en.wikipedia.org/wiki/Debian_version_history
+        #
+        if [[ $deb_ver =~ bullseye ]]; then
+            deb_ver="11"
+        elif [[ $deb_ver =~ bookworm ]]; then
+            deb_ver="12"
+        elif [[ $deb_ver =~ trixie ]]; then
+            deb_ver="13"
+        fi
+        if at_least_required_version "10" "$deb_ver"; then
+          apt_pkgs="$apt_pkgs python3-distutils" # guess it's no longer built-in, lensfun requires it...
+        fi
+        if at_least_required_version "11" "$deb_ver"; then
+          apt_pkgs="$apt_pkgs python-is-python3" # needed
+        fi
+        apt_missing="$(apt_not_installed "$apt_pkgs")"
+        echo "$ sudo apt-get install $apt_missing -y"
+        ;;
+      *)
+        echo "for OS X (homebrew): brew install ragel wget cvs yasm autogen automake autoconf cmake libtool xz pkg-config nasm bzip2 autoconf-archive p7zip coreutils meson llvm" # if edit this edit docker/Dockerfile also :|
+        echo "   and set llvm to your PATH if on catalina"
+        echo "for RHEL/CentOS: First ensure you have epel repo available, then run $ sudo yum install ragel subversion texinfo libtool autogen gperf nasm patch unzip pax ed gcc-c++ bison flex yasm automake autoconf gcc zlib-devel cvs bzip2 cmake3 -y"
+        echo "for fedora: if your distribution comes with a modern version of cmake then use the same as RHEL/CentOS but replace cmake3 with cmake."
+        echo "for linux native compiler option: same as <your OS> above, also add libva-dev"
+        ;;
+    esac
     exit 1
   fi
 
@@ -105,7 +155,7 @@ check_missing_packages () {
         break
       else
         echo "your ${cmake_binary} version is too old ${cmake_version} wanted ${REQUIRED_CMAKE_VERSION}"
-      fi 
+      fi
     fi
   done
 
@@ -115,7 +165,9 @@ check_missing_packages () {
     exit 1
   else
     # If cmake_command is set then either one of the cmake's is adequate.
-    echo "cmake binary for this build will be ${cmake_command}"
+    if [[ $cmake_command != "cmake" ]]; then # don't echo if it's the normal default
+      echo "cmake binary for this build will be ${cmake_command}"
+    fi
   fi
 
   if [[ ! -f /usr/include/zlib.h ]]; then
@@ -123,18 +175,47 @@ check_missing_packages () {
     sleep 1
   fi
 
+  # TODO nasm version :|
+
   # doing the cut thing with an assigned variable dies on the version of yasm I have installed (which I'm pretty sure is the RHEL default)
   # because of all the trailing lines of stuff
-  export REQUIRED_YASM_VERSION="1.2.0"
-  yasm_binary=yasm
-  yasm_version="$( "${yasm_binary}" --version |sed -e "s#${yasm_binary}##g" | head -n 1 | tr -dc '[0-9.\n]' )"
+  export REQUIRED_YASM_VERSION="1.2.0" # export ???
+  local yasm_binary=yasm
+  local yasm_version="$( "${yasm_binary}" --version |sed -e "s#${yasm_binary}##g" | head -n 1 | tr -dc '[0-9.\n]' )"
   if ! at_least_required_version "${REQUIRED_YASM_VERSION}" "${yasm_version}"; then
     echo "your yasm version is too old $yasm_version wanted ${REQUIRED_YASM_VERSION}"
     exit 1
   fi
+  local meson_version=`meson --version`
+  if ! at_least_required_version "0.49.2" "${meson_version}"; then
+    echo "your meson version is too old $meson_version wanted 0.49.2"
+    exit 1
+  fi
+  # also check missing "setup" so it's early LOL
+
+  #check if WSL
+  # check WSL for interop setting make sure its disabled
+  # check WSL for kernel version look for version 4.19.128 current as of 11/01/2020
+  if uname -a | grep  -q -- "-microsoft" ; then
+    if cat /proc/sys/fs/binfmt_misc/WSLInterop | grep -q enabled ; then
+      echo "windows WSL detected: you must first disable 'binfmt' by running this
+      sudo bash -c 'echo 0 > /proc/sys/fs/binfmt_misc/WSLInterop'
+      then try again"
+      exit 1
+    fi
+    export MINIMUM_KERNEL_VERSION = "4.19.128"
+    KERNVER=$(uname -a | awk -F'[ ]' '{ print $3 }' | awk -F- '{ print $1 }')
+
+    if [ $KERNVER != $MINIMUM_KERNEL_VERSION ]; then
+      echo "Windows Subsystem for Linux (WSL) detected - kernel not at minumum version required: $MINIMUM_KERNEL_VERSION
+      Please update via windows update then try again"
+      exit 1
+    fi
+  fi
+
 }
 
-determine_distro() { 
+determine_distro() {
 
 # Determine OS platform from https://askubuntu.com/a/459425/20972
 UNAME=$(uname | tr "[:upper:]" "[:lower:]")
@@ -145,7 +226,7 @@ if [ "$UNAME" == "linux" ]; then
         export DISTRO=$(lsb_release -i | cut -d: -f2 | sed s/'^\t'//)
     # Otherwise, use release info file
     else
-        export DISTRO=$(ls -d /etc/[A-Za-z]*[_-][rv]e[lr]* | grep -v "lsb" | cut -d'/' -f3 | cut -d'-' -f1 | cut -d'_' -f1)
+        export DISTRO=$(grep '^ID' /etc/os-release | sed 's#.*=\(\)#\1#')
     fi
 fi
 # For everything else (or if above failed), just use generic identifier
@@ -155,7 +236,6 @@ unset UNAME
 
 
 intro() {
-  echo `date`
   cat <<EOL
      ##################### Welcome ######################
   Welcome to the ffmpeg cross-compile builder-helper script.
@@ -166,9 +246,10 @@ intro() {
   the sandbox directory, since it will have some hard coded paths in there.
   You can, of course, rebuild ffmpeg from within it, etc.
 EOL
+  echo `date` # for timestamping super long builds LOL
   if [[ $sandbox_ok != 'y' && ! -d sandbox ]]; then
     echo
-    echo "Building in $PWD/sandbox, will use ~ 4GB space!"
+    echo "Building in $PWD/sandbox, will use ~ 12GB space!"
     echo
   fi
   mkdir -p "$cur_dir"
@@ -255,7 +336,7 @@ install_cross_compiler() {
 
     # --disable-shared allows c++ to be distributed at all...which seemed necessary for some random dependency which happens to use/require c++...
     local zeranoe_script_name=mingw-w64-build-r22.local
-    local zeranoe_script_options="--gcc-ver=8.2.0 --default-configure --cpu-count=$gcc_cpu_count --pthreads-w32-ver=2-9-1 --disable-shared --clean-build --verbose --allow-overwrite" # allow-overwrite to avoid some crufty prompts if I do rebuilds [or maybe should just nuke everything...]
+    local zeranoe_script_options="--gcc-ver=10.2.0 --mingw-w64-ver=8.0.0 --default-configure --cpu-count=$gcc_cpu_count --disable-shared --clean-build --verbose --allow-overwrite --threads=winpthreads" # allow-overwrite to avoid some crufty prompts if I do rebuilds [or maybe should just nuke everything...]
     if [[ ($compiler_flavors == "win32" || $compiler_flavors == "multi") && ! -f ../$win32_gcc ]]; then
       echo "Building win32 cross compiler..."
       download_gcc_build_script $zeranoe_script_name
@@ -267,6 +348,10 @@ install_cross_compiler() {
         echo "Failure building 32 bit gcc? Recommend nuke sandbox (rm -rf sandbox) and start over..."
         exit 1
       fi
+      if [[ ! -f  ../cross_compilers/mingw-w64-i686/i686-w64-mingw32/lib/libmingwex.a ]]; then
+	      echo "failure building mingwex? 32 bit"
+	      exit 1
+      fi
     fi
     if [[ ($compiler_flavors == "win64" || $compiler_flavors == "multi") && ! -f ../$win64_gcc ]]; then
       echo "Building win64 x86_64 cross compiler..."
@@ -275,6 +360,10 @@ install_cross_compiler() {
       if [[ ! -f ../$win64_gcc ]]; then
         echo "Failure building 64 bit gcc? Recommend nuke sandbox (rm -rf sandbox) and start over..."
         exit 1
+      fi
+      if [[ ! -f  ../cross_compilers/mingw-w64-x86_64/x86_64-w64-mingw32/lib/libmingwex.a ]]; then
+	      echo "failure building mingwex? 64 bit"
+	      exit 1
       fi
     fi
 
@@ -337,10 +426,12 @@ do_git_checkout() {
   if [[ -z $desired_branch ]]; then
     desired_branch="origin/master"
   fi
-  echo "doing git checkout $desired_branch" 
-  git checkout "$desired_branch" || (git_hard_reset && git checkout "$desired_branch") || exit 1 # can't just use merge -f because might "think" patch files already applied when their changes have been lost, etc...
-  git merge "$desired_branch" || exit 1 # get incoming changes to a branch else if you do another git checkout it says "Already on 'xx'"
-
+  echo "doing git checkout $desired_branch"
+  git checkout "$desired_branch" || (git_hard_reset && git checkout "$desired_branch") || (git reset --hard "$desired_branch") || exit 1 # can't just use merge -f because might "think" patch files already applied when their changes have been lost, etc...
+  # vmaf on 16.04 needed that weird reset --hard? huh?
+  if git show-ref --verify --quiet "refs/remotes/origin/$desired_branch"; then # $desired_branch is actually a branch, not a tag or commit
+    git merge "origin/$desired_branch" || exit 1 # get incoming changes to a branch
+  fi
   new_git_version=`git rev-parse HEAD`
   if [[ "$old_git_version" != "$new_git_version" ]]; then
     echo "got upstream changes, forcing re-configure. Doing git clean -f"
@@ -377,6 +468,8 @@ do_configure() {
     # make uninstall # does weird things when run under ffmpeg src so disabled for now...
 
     echo "configuring $english_name ($PWD) as $ PKG_CONFIG_PATH=$PKG_CONFIG_PATH PATH=$mingw_bin_path:\$PATH $configure_name $configure_options" # say it now in case bootstrap fails etc.
+    echo "all touch files" already_configured* touchname= "$touch_name"
+    echo "config options "$configure_options $configure_name""
     if [ -f bootstrap ]; then
       ./bootstrap # some need this to create ./configure :|
     fi
@@ -387,7 +480,7 @@ do_configure() {
       autoreconf -fiv # a handful of them require this to create ./configure :|
     fi
     rm -f already_* # reset
-    nice -n 5 "$configure_name" $configure_options || exit 1 # less nice (since single thread, and what if you're running another ffmpeg nice build elsewhere?)
+    nice -n 5 "$configure_name" $configure_options || { echo "failed configure $english_name"; exit 1;} # less nicey than make (since single thread, and what if you're running another ffmpeg nice build elsewhere?)
     touch -- "$touch_name"
     echo "doing preventative make clean"
     nice make clean -j $cpu_count # sometimes useful when files change, etc.
@@ -439,6 +532,10 @@ do_make_install() {
 
 do_cmake() {
   extra_args="$1"
+  local build_from_dir="$2"
+  if [[ -z $build_from_dir ]]; then
+    build_from_dir="."
+  fi
   local touch_name=$(get_small_touchfile_name already_ran_cmake "$extra_args")
 
   if [ ! -f $touch_name ]; then
@@ -446,39 +543,89 @@ do_cmake() {
     local cur_dir2=$(pwd)
     echo doing cmake in $cur_dir2 with PATH=$mingw_bin_path:\$PATH with extra_args=$extra_args like this:
     if [[ $compiler_flavors != "native" ]]; then
-      echo ${cmake_command} -G\"Unix Makefiles\" . -DENABLE_STATIC_RUNTIME=1 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=$mingw_w64_x86_64_prefix -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_RANLIB=${cross_prefix}ranlib -DCMAKE_C_COMPILER=${cross_prefix}gcc -DCMAKE_CXX_COMPILER=${cross_prefix}g++ -DCMAKE_RC_COMPILER=${cross_prefix}windres -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args
-      ${cmake_command} -G"Unix Makefiles" . -DENABLE_STATIC_RUNTIME=1 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=$mingw_w64_x86_64_prefix -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_RANLIB=${cross_prefix}ranlib -DCMAKE_C_COMPILER=${cross_prefix}gcc -DCMAKE_CXX_COMPILER=${cross_prefix}g++ -DCMAKE_RC_COMPILER=${cross_prefix}windres -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
+      local command="${build_from_dir} -DENABLE_STATIC_RUNTIME=1 -DBUILD_SHARED_LIBS=0 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=$mingw_w64_x86_64_prefix -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_RANLIB=${cross_prefix}ranlib -DCMAKE_C_COMPILER=${cross_prefix}gcc -DCMAKE_CXX_COMPILER=${cross_prefix}g++ -DCMAKE_RC_COMPILER=${cross_prefix}windres -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args"
     else
-      echo "doing cmake" ${cmake_command} -G"Unix Makefiles" . -DENABLE_STATIC_RUNTIME=1 -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
-      nice -n 5 ${cmake_command} -G"Unix Makefiles" . -DENABLE_STATIC_RUNTIME=1 -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
+      local command="${build_from_dir} -DENABLE_STATIC_RUNTIME=1 -DBUILD_SHARED_LIBS=0 -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args"
     fi
+    echo "doing ${cmake_command}  -G\"Unix Makefiles\" $command"
+    nice -n 5  ${cmake_command} -G"Unix Makefiles" $command || exit 1
     touch $touch_name || exit 1
   fi
 }
 
-do_cmake_from_build_dir() { # XX combine with the above :)
+do_cmake_from_build_dir() { # some sources don't allow it, weird XXX combine with the above :)
   source_dir="$1"
   extra_args="$2"
-  local touch_name=$(get_small_touchfile_name already_ran_cmake "$extra_args")
-
-  if [ ! -f $touch_name ]; then
-    rm -f already_* # reset so that make will run again if option just changed
-    local cur_dir2=$(pwd)
-    echo doing cmake in $cur_dir2 with PATH=$mingw_bin_path:\$PATH with extra_args=$extra_args like this:
-    if [[ $compiler_flavors != "native" ]]; then
-      echo ${cmake_command} -G\"Unix Makefiles\" $source_dir -DENABLE_STATIC_RUNTIME=1 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=$mingw_w64_x86_64_prefix -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_RANLIB=${cross_prefix}ranlib -DCMAKE_C_COMPILER=${cross_prefix}gcc -DCMAKE_CXX_COMPILER=${cross_prefix}g++ -DCMAKE_RC_COMPILER=${cross_prefix}windres -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args
-      ${cmake_command} -G"Unix Makefiles" $source_dir -DENABLE_STATIC_RUNTIME=1 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=$mingw_w64_x86_64_prefix -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_RANLIB=${cross_prefix}ranlib -DCMAKE_C_COMPILER=${cross_prefix}gcc -DCMAKE_CXX_COMPILER=${cross_prefix}g++ -DCMAKE_RC_COMPILER=${cross_prefix}windres -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
-    else
-      echo ${cmake_command} -G\"Unix Makefiles\" $source_dir -DENABLE_STATIC_RUNTIME=1 -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
-      ${cmake_command} -G"Unix Makefiles" $source_dir -DENABLE_STATIC_RUNTIME=1 -DCMAKE_INSTALL_PREFIX=$mingw_w64_x86_64_prefix $extra_args || exit 1
-    fi
-    touch $touch_name || exit 1
-  fi
+  do_cmake "$extra_args" "$source_dir"
 }
 
 do_cmake_and_install() {
   do_cmake "$1"
   do_make_and_make_install
+}
+
+do_meson() {
+    local configure_options="$1 --unity=off"
+    local configure_name="$2"
+    local configure_env="$3"
+    local configure_noclean=""
+    if [[ "$configure_name" = "" ]]; then
+        configure_name="meson"
+    fi
+    local cur_dir2=$(pwd)
+    local english_name=$(basename $cur_dir2)
+    local touch_name=$(get_small_touchfile_name already_built "$configure_options $configure_name $LDFLAGS $CFLAGS")
+    if [ ! -f "$touch_name" ]; then
+        if [ "$configure_noclean" != "noclean" ]; then
+            make clean # just in case
+        fi
+        rm -f already_* # reset
+        echo "Using meson: $english_name ($PWD) as $ PATH=$PATH ${configure_env} $configure_name $configure_options"
+        #env
+        "$configure_name" $configure_options || exit 1
+        touch -- "$touch_name"
+        make clean # just in case
+    else
+        echo "Already used meson $(basename $cur_dir2)"
+    fi
+}
+
+generic_meson() {
+    local extra_configure_options="$1"
+    mkdir -pv build
+    do_meson "--prefix=${mingw_w64_x86_64_prefix} --libdir=${mingw_w64_x86_64_prefix}/lib --buildtype=release --default-library=static --cross-file=${top_dir}/meson-cross.mingw.txt $extra_configure_options . build"
+}
+
+generic_meson_ninja_install() {
+    generic_meson "$1"
+    do_ninja_and_ninja_install
+}
+
+do_ninja_and_ninja_install() {
+    local extra_ninja_options="$1"
+    do_ninja "$extra_ninja_options"
+    local touch_name=$(get_small_touchfile_name already_ran_make_install "$extra_ninja_options")
+    if [ ! -f $touch_name ]; then
+        echo "ninja installing $(pwd) as $PATH=$PATH ninja -C build install $extra_make_options"
+        ninja -C build install || exit 1
+        touch $touch_name || exit 1
+    fi
+}
+
+do_ninja() {
+  local extra_make_options=" -j $cpu_count"
+  local cur_dir2=$(pwd)
+  local touch_name=$(get_small_touchfile_name already_ran_make "${extra_make_options}")
+
+  if [ ! -f $touch_name ]; then
+    echo
+    echo "ninja-ing $cur_dir2 as $ PATH=$PATH ninja -C build "${extra_make_options}"
+    echo
+    ninja -C build "${extra_make_options} || exit 1
+    touch $touch_name || exit 1 # only touch if the build was OK
+  else
+    echo "already did ninja $(basename "$cur_dir2")"
+  fi
 }
 
 apply_patch() {
@@ -497,7 +644,8 @@ apply_patch() {
     echo "applying patch $patch_name"
     patch $patch_type < "$patch_name" || exit 1
     touch $patch_done_name || exit 1
-    rm -f already_ran* # if it's a new patch, reset everything too, in case it's really really really new
+    # too crazy, you can't do do_configure then apply a patch?
+    # rm -f already_ran* # if it's a new patch, reset everything too, in case it's really really really new
   #else
   #  echo "patch $patch_name already applied" # too chatty
   fi
@@ -517,7 +665,7 @@ download_and_unpack_file() {
     output_dir=$(basename $url | sed s/\.tar\.*//) # remove .tar.xx
   fi
   if [ ! -f "$output_dir/unpacked.successfully" ]; then
-    echo "downloading $url"
+    echo "downloading $url" # redownload in case failed...
     if [[ -f $output_name ]]; then
       rm $output_name || exit 1
     fi
@@ -568,7 +716,7 @@ do_git_checkout_and_make_install() {
 
 generic_configure_make_install() {
   if [ $# -gt 0 ]; then
-    echo "cant pass parameters to this today"
+    echo "cant pass parameters to this method today, they'd be a bit ambiguous"
     echo "The following arguments where passed: ${@}"
     exit 1
   fi
@@ -599,22 +747,22 @@ build_dlfcn() {
 }
 
 build_bzip2() {
-  download_and_unpack_file https://fossies.org/linux/misc/bzip2-1.0.6.tar.gz
-  cd bzip2-1.0.6
-    apply_patch file://$patch_dir/bzip2-1.0.6_brokenstuff.diff
-    if [[ ! -f $mingw_w64_x86_64_prefix/lib/libbz2.a ]]; then # Library only.
+  download_and_unpack_file https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+  cd bzip2-1.0.8
+    apply_patch file://$patch_dir/bzip2-1.0.8_brokenstuff.diff
+    if [[ ! -f ./libbz2.a ]] || [[ -f $mingw_w64_x86_64_prefix/lib/libbz2.a && ! $(/usr/bin/env md5sum ./libbz2.a) = $(/usr/bin/env md5sum $mingw_w64_x86_64_prefix/lib/libbz2.a) ]]; then # Not built or different build installed
       do_make "$make_prefix_options libbz2.a"
       install -m644 bzlib.h $mingw_w64_x86_64_prefix/include/bzlib.h
       install -m644 libbz2.a $mingw_w64_x86_64_prefix/lib/libbz2.a
     else
-      echo "already made bzip2-1.0.6"
+      echo "Already made bzip2-1.0.8"
     fi
   cd ..
 }
 
 build_liblzma() {
-  download_and_unpack_file https://sourceforge.net/projects/lzmautils/files/xz-5.2.3.tar.xz
-  cd xz-5.2.3
+  download_and_unpack_file https://sourceforge.net/projects/lzmautils/files/xz-5.2.5.tar.xz
+  cd xz-5.2.5
     generic_configure "--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-scripts --disable-doc --disable-nls"
     do_make_and_make_install
   cd ..
@@ -623,34 +771,46 @@ build_liblzma() {
 build_zlib() {
   download_and_unpack_file https://github.com/madler/zlib/archive/v1.2.11.tar.gz zlib-1.2.11
   cd zlib-1.2.11
-    do_configure "--prefix=$mingw_w64_x86_64_prefix --static"
+    local make_options
     if [[ $compiler_flavors == "native" ]]; then
-      do_make_and_make_install "$make_prefix_options" # can't take ARFLAGS...
+      export CFLAGS="$CFLAGS -fPIC" # For some reason glib needs this even though we build a static library
     else
-      do_make_and_make_install "$make_prefix_options ARFLAGS=rcs" # https://stackoverflow.com/questions/21396988/zlib-build-not-configuring-properly-with-cross-compiler-ignores-ar
+      export ARFLAGS=rcs # Native can't take ARFLAGS; https://stackoverflow.com/questions/21396988/zlib-build-not-configuring-properly-with-cross-compiler-ignores-ar
+    fi
+    do_configure "--prefix=$mingw_w64_x86_64_prefix --static"
+    do_make_and_make_install "$make_prefix_options ARFLAGS=rcs"
+    if [[ $compiler_flavors == "native" ]]; then
+      reset_cflags
+    else
+      unset ARFLAGS
     fi
   cd ..
 }
 
 build_iconv() {
-  download_and_unpack_file https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.15.tar.gz
-  cd libiconv-1.15
+  download_and_unpack_file https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.16.tar.gz
+  cd libiconv-1.16
     generic_configure "--disable-nls"
     do_make "install-lib" # No need for 'do_make_install', because 'install-lib' already has install-instructions.
   cd ..
 }
 
 build_sdl2() {
-  download_and_unpack_file http://libsdl.org/release/SDL2-2.0.5.tar.gz
-  cd SDL2-2.0.5
-    apply_patch file://$patch_dir/SDL2-2.0.5_lib-only.diff
-    #apply_patch file://$patch_dir/sdl2.xinput.diff # mingw-w64 master needs it?
+  download_and_unpack_file https://www.libsdl.org/release/SDL2-2.0.12.tar.gz
+  cd SDL2-2.0.12
+    apply_patch file://$patch_dir/SDL2-2.0.12_lib-only.diff
     if [[ ! -f configure.bak ]]; then
       sed -i.bak "s/ -mwindows//" configure # Allow ffmpeg to output anything to console.
     fi
-    export CFLAGS=-DDECLSPEC=  # avoid SDL trac tickets 939 and 282 [broken shared builds], and not worried about optimizing yet...
-generic_configure "--bindir=$mingw_bin_path"
+    export CFLAGS="$CFLAGS -DDECLSPEC="  # avoid SDL trac tickets 939 and 282 [broken shared builds]
+    if [[ $compiler_flavors == "native" ]]; then
+      unset PKG_CONFIG_LIBDIR # Allow locally installed things for native builds; libpulse-dev is an important one otherwise no audio for most Linux
+    fi
+    generic_configure "--bindir=$mingw_bin_path"
     do_make_and_make_install
+    if [[ $compiler_flavors == "native" ]]; then
+      export PKG_CONFIG_LIBDIR=
+    fi
     if [[ ! -f $mingw_bin_path/$host_target-sdl2-config ]]; then
       mv "$mingw_bin_path/sdl2-config" "$mingw_bin_path/$host_target-sdl2-config" # At the moment FFmpeg's 'configure' doesn't use 'sdl2-config', because it gives priority to 'sdl2.pc', but when it does, it expects 'i686-w64-mingw32-sdl2-config' in 'cross_compilers/mingw-w64-i686/bin'.
     fi
@@ -661,15 +821,16 @@ generic_configure "--bindir=$mingw_bin_path"
 build_amd_amf_headers() {
   # was https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git too big
   # or https://github.com/DeadSix27/AMF smaller
-  # just right...
+  # but even smaller!
   do_git_checkout https://github.com/rdp/amf_headers.git amf_headers_git
+
   cd amf_headers_git
     if [ ! -f "already_installed" ]; then
       #rm -rf "./Thirdparty" # ?? plus too chatty...
       if [ ! -d "$mingw_w64_x86_64_prefix/include/AMF" ]; then
         mkdir -p "$mingw_w64_x86_64_prefix/include/AMF"
       fi
-      cp -av "amf/public/include/." "$mingw_w64_x86_64_prefix/include/AMF" 
+      cp -av "amf/public/include/." "$mingw_w64_x86_64_prefix/include/AMF"
       touch "already_installed"
     fi
   cd ..
@@ -701,45 +862,57 @@ build_intel_quicksync_mfx() { # i.e. qsv, disableable via command line switch...
 
 build_libleptonica() {
   build_libjpeg_turbo
-  do_git_checkout https://github.com/DanBloomberg/leptonica.git 
+  do_git_checkout https://github.com/DanBloomberg/leptonica.git leptonica_git 1.80.0
   cd leptonica_git
-    generic_configure "--without-libopenjpeg" # never could quite figure out how to get it to work with jp2 stuffs...I think OPJ_STATIC or something, see issue for tesseract
-    do_make_and_make_install
+    export CPPFLAGS="-DOPJ_STATIC"
+    generic_configure_make_install
+    reset_cppflags
   cd ..
 }
 
 build_libtiff() {
   build_libjpeg_turbo # auto uses it?
-  generic_download_and_make_and_install http://download.osgeo.org/libtiff/tiff-4.0.9.tar.gz
+  generic_download_and_make_and_install http://download.osgeo.org/libtiff/tiff-4.1.0.tar.gz
   sed -i.bak 's/-ltiff.*$/-ltiff -llzma -ljpeg -lz/' $PKG_CONFIG_PATH/libtiff-4.pc # static deps
-} 
+}
 
 build_libtensorflow() {
   do_git_checkout_and_make_install https://github.com/tensorflow/tensorflow.git
 }
 
 build_glib() {
-  export CPPFLAGS='-DLIBXML_STATIC' # gettext build...
-  generic_download_and_make_and_install  https://ftp.gnu.org/pub/gnu/gettext/gettext-0.19.8.1.tar.xz
-  unset CPPFLAGS
-  generic_download_and_make_and_install  http://sourceware.org/pub/libffi/libffi-3.2.1.tar.gz # also dep
-  download_and_unpack_file https://ftp.gnome.org/pub/gnome/sources/glib/2.56/glib-2.56.3.tar.xz # there's a 2.58 but guess I'd need to use meson for that, too complicated...also didn't yet contain the DllMain patch I believe, so no huge win...
-  cd glib-2.56.3
-    export CPPFLAGS='-liconv -pthread' # I think gettext wanted this but has no .pc file??
-    if [[ $compiler_flavors != "native" ]]; then # seemingly unneeded for OS X
-      apply_patch file://$patch_dir/glib_msg_fmt.patch # needed for configure
-      apply_patch  file://$patch_dir/glib-prefer-constructors-over-DllMain.patch # needed for static. weird.
+  export CPPFLAGS="$CPPFLAGS -DLIBXML_STATIC -liconv" # gettext build...
+  generic_download_and_make_and_install  https://ftp.gnu.org/pub/gnu/gettext/gettext-0.21.tar.gz
+  reset_cppflags
+  generic_download_and_make_and_install  https://github.com/libffi/libffi/releases/download/v3.3/libffi-3.3.tar.gz # also dep
+  download_and_unpack_file https://gitlab.gnome.org/GNOME/glib/-/archive/2.64.3/glib-2.64.3.tar.gz
+  cd glib-2.64.3
+    apply_patch  file://$patch_dir/glib-2.64.3_mingw-static.patch -p1
+    export CPPFLAGS="$CPPFLAGS -pthread -DGLIB_STATIC_COMPILATION"
+    export CXXFLAGS="$CFLAGS" # Not certain this is needed, but it doesn't hurt
+    export LDFLAGS="-L${mingw_w64_x86_64_prefix}/lib" # For some reason the frexp configure checks fail without this as math.h isn't found when cross-compiling; no negative impact for native builds
+    local meson_options="--prefix=${mingw_w64_x86_64_prefix} --libdir=${mingw_w64_x86_64_prefix}/lib --buildtype=release --default-library=static -Dinternal_pcre=true -Dforce_posix_threads=true . build"
+    if [[ $compiler_flavors != "native" ]]; then
+      get_local_meson_cross_with_propeties # Need to add flags to meson properties; otherwise ran into some issues
+      meson_options+=" --cross-file=meson-cross.mingw.txt"
     fi
-    generic_configure "--with-pcre=internal" # too lazy for pcre :) XXX
-    unset CPPFLAGS
-    do_make_and_make_install
+    do_meson "$meson_options"
+    do_ninja_and_ninja_install
+    if [[ $compiler_flavors == "native" ]]; then
+      sed -i.bak 's/-lglib-2.0.*$/-lglib-2.0 -pthread -lm -liconv/' $PKG_CONFIG_PATH/glib-2.0.pc
+    else
+      sed -i.bak 's/-lglib-2.0.*$/-lglib-2.0 -lintl -pthread -lws2_32 -lwinmm -lm -liconv -lole32/' $PKG_CONFIG_PATH/glib-2.0.pc
+    fi
+    reset_cppflags
+    unset CXXFLAGS
+    unset LDFLAGS
   cd ..
 }
 
 build_lensfun() {
   build_glib
-  download_and_unpack_file https://sourceforge.net/projects/lensfun/files/0.3.95/lensfun-0.3.95.tar.gz
-  cd lensfun-0.3.95
+  do_git_checkout https://github.com/lensfun/lensfun.git lensfun_git
+  cd lensfun_git
     export CMAKE_STATIC_LINKER_FLAGS='-lws2_32 -pthread'
     do_cmake "-DBUILD_STATIC=on -DCMAKE_INSTALL_DATAROOTDIR=$mingw_w64_x86_64_prefix"
     do_make
@@ -750,30 +923,52 @@ build_lensfun() {
 }
 
 build_libtesseract() {
-  build_libleptonica
   build_libtiff # no disable configure option for this in tesseract? odd...
-  do_git_checkout https://github.com/tesseract-ocr/tesseract.git tesseract_git a2e72f258a3bd6811cae226a01802d # #315
+  build_libleptonica
+  do_git_checkout https://github.com/tesseract-ocr/tesseract.git tesseract_git 4.1.1
   cd tesseract_git
-    generic_configure_make_install
     if [[ $compiler_flavors != "native"  ]]; then
+      apply_patch file://$patch_dir/tesseract-4.1.1_mingw-std-threads.patch
+      generic_configure "--disable-openmp"
+      do_make_and_make_install
       sed -i.bak 's/-ltesseract.*$/-ltesseract -lstdc++ -lws2_32 -llept -ltiff -llzma -ljpeg -lz/' $PKG_CONFIG_PATH/tesseract.pc # why does it needs winsock? LOL plus all of libtiff's <sigh>
     else
+      generic_configure_make_install
       sed -i.bak 's/-ltesseract.*$/-ltesseract -lstdc++ -llept -ltiff -llzma -ljpeg -lz -lgomp/' $PKG_CONFIG_PATH/tesseract.pc # see above, gomp for linux native
     fi
   cd ..
 }
 
 build_libzimg() {
-  do_git_checkout https://github.com/sekrit-twc/zimg.git zimg_git 8e87f5a4b88e16ccafb2e7ade8ef45
+  do_git_checkout https://github.com/sekrit-twc/zimg.git zimg_git
   cd zimg_git
     generic_configure_make_install
   cd ..
 }
 
 build_libopenjpeg() {
-  do_git_checkout https://github.com/uclouvain/openjpeg.git # basically v2.3+ 
+  do_git_checkout https://github.com/uclouvain/openjpeg.git # basically v2.3+
   cd openjpeg_git
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=0 -DBUILD_CODEC=0"
+    do_cmake_and_install "-DBUILD_CODEC=0"
+  cd ..
+}
+
+build_glew() {
+  download_and_unpack_file https://sourceforge.net/projects/glew/files/glew/2.2.0/glew-2.2.0.tgz glew-2.2.0
+  cd glew-2.2.0/build
+    local cmake_params=""
+    if [[ $compiler_flavors != "native" ]]; then
+      cmake_params+=" -DWIN32=1"
+    fi
+    do_cmake_from_build_dir ./cmake "$cmake_params" # "-DWITH_FFMPEG=0 -DOPENCV_GENERATE_PKGCONFIG=1 -DHAVE_DSHOW=0"
+    do_make_and_make_install
+  cd ../..
+}
+
+build_glfw() {
+  download_and_unpack_file https://github.com/glfw/glfw/releases/download/3.3.2/glfw-3.3.2.zip glfw-3.3.2
+  cd glfw-3.3.2
+    do_cmake_and_install
   cd ..
 }
 
@@ -795,33 +990,97 @@ build_libwebp() {
   cd ..
 }
 
+build_harfbuzz() {
+  local new_build=false
+  do_git_checkout https://github.com/harfbuzz/harfbuzz.git harfbuzz_git
+  if [ ! -f harfbuzz_git/already_done_harf ]; then # Not done or new master, so build
+    new_build=true
+  fi
+
+  # basically gleaned from https://gist.github.com/roxlu/0108d45308a0434e27d4320396399153
+  build_freetype "--without-harfbuzz" $new_build # Check for initial or new freetype or force rebuild if needed
+  local new_freetype=$?
+  if $new_build || [ $new_freetype = 0 ]; then # 0 is true
+    rm -f harfbuzz_git/already* # Force rebuilding in case only freetype has changed
+    # cmake no .pc file generated so use configure :|
+    cd harfbuzz_git
+      if [ ! -f configure ]; then
+        ./autogen.sh # :|
+      fi
+      export LDFLAGS=-lpthread # :|
+      generic_configure "--with-freetype=yes --with-fontconfig=no --with-icu=no" # no fontconfig, don't want another circular what? icu is #372
+      unset LDFLAGS
+      do_make_and_make_install
+    cd ..
+
+    build_freetype "--with-harfbuzz" true # with harfbuzz now...
+    touch harfbuzz_git/already_done_harf
+    echo "Done harfbuzz"
+  else
+    echo "Already done harfbuzz"
+  fi
+  sed -i.bak 's/-lfreetype.*/-lfreetype -lharfbuzz -lpthread/' "$PKG_CONFIG_PATH/freetype2.pc" # for some reason it lists harfbuzz as Requires.private only??
+  sed -i.bak 's/-lharfbuzz.*/-lharfbuzz -lfreetype/' "$PKG_CONFIG_PATH/harfbuzz.pc" # does anything even use this?
+  sed -i.bak 's/libfreetype.la -lbz2/libfreetype.la -lharfbuzz -lbz2/' "${mingw_w64_x86_64_prefix}/lib/libfreetype.la" # XXX what the..needed?
+  sed -i.bak 's/libfreetype.la -lbz2/libfreetype.la -lharfbuzz -lbz2/' "${mingw_w64_x86_64_prefix}/lib/libharfbuzz.la"
+}
+
 build_freetype() {
-  download_and_unpack_file https://sourceforge.net/projects/freetype/files/freetype2/2.8/freetype-2.8.tar.bz2
-  cd freetype-2.8
-    if [[ `uname` == CYGWIN* ]]; then
-      generic_configure "--build=i686-pc-cygwin --with-bzip2" # hard to believe but needed...
-      # 'configure' can't detect bzip2 without '--with-bzip2', because there's no 'bzip2.pc'.
-    else
-      generic_configure "--with-bzip2"
-    fi
-    do_make_and_make_install
-  cd ..
+  local force_build=$2
+  local new_build=1
+  if [[ ! -f freetype-2.10.4/already_done_freetype || $force_build = true ]]; then
+    download_and_unpack_file https://sourceforge.net/projects/freetype/files/freetype2/2.10.4/freetype-2.10.4.tar.xz
+    rm -f freetype-2.10.4/already*
+    cd freetype-2.10.4
+        # harfbuzz autodetect :|
+        generic_configure "--with-bzip2 $1"
+        do_make_and_make_install
+        touch already_done_freetype
+        new_build=0
+    cd ..
+  fi
+  return $new_build # Give caller a way to know if a new build was done
 }
 
 build_libxml2() {
-  download_and_unpack_file http://xmlsoft.org/sources/libxml2-2.9.4.tar.gz libxml2-2.9.4
-  cd libxml2-2.9.4
-    if [[ ! -f libxml.h.bak ]]; then # Otherwise you'll get "libxml.h:...: warning: "LIBXML_STATIC" redefined". Not an error, but still.
-      sed -i.bak "/NOLIBTOOL/s/.*/& \&\& !defined(LIBXML_STATIC)/" libxml.h
-    fi
+  download_and_unpack_file http://xmlsoft.org/sources/libxml2-2.9.10.tar.gz libxml2-2.9.10
+  cd libxml2-2.9.10
     generic_configure "--with-ftp=no --with-http=no --with-python=no"
     do_make_and_make_install
   cd ..
 }
 
+build_libvmaf() {
+  do_git_checkout https://github.com/Netflix/vmaf.git vmaf_git v1.5.2
+  cd vmaf_git
+    apply_patch file://$patch_dir/libvmaf.various-1.5.2.patch -p1
+    cd libvmaf
+    export CFLAGS="$CFLAGS -pthread"
+    export CXXFLAGS="$CFLAGS -pthread"
+    export LDFLAGS="-pthread" # Needed here too for some reason
+    mkdir build
+    local meson_options="--prefix=${mingw_w64_x86_64_prefix} --libdir=${mingw_w64_x86_64_prefix}/lib --buildtype=release --default-library=static . build"
+    if [[ $compiler_flavors != "native" ]]; then
+      get_local_meson_cross_with_propeties # Need to add flags to meson properties; otherwise ran into some issues
+      meson_options+=" --cross-file=meson-cross.mingw.txt"
+    fi
+    do_meson "$meson_options"
+    do_ninja_and_ninja_install
+    reset_cflags
+    unset CXXFLAGS
+    unset LDFLAGS
+    if [[ $compiler_flavors == "native" ]]; then # Can't find a way to not build these; meson is already set to --default-library=static but it still builds both
+      rm -f ${mingw_w64_x86_64_prefix}/lib/libvmaf.so
+    else
+      rm -f ${mingw_w64_x86_64_prefix}/lib/libvmaf.dll.a
+    fi
+    sed -i.bak "s/Libs.private.*/& -lstdc++/" "$PKG_CONFIG_PATH/libvmaf.pc" # .pc is still broken
+  cd ../..
+}
+
 build_fontconfig() {
-  download_and_unpack_file https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.12.4.tar.gz
-  cd fontconfig-2.12.4
+  download_and_unpack_file https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.13.92.tar.xz
+  cd fontconfig-2.13.92
     #export CFLAGS= # compile fails with -march=sandybridge ... with mingw 4.0.6 at least ...
     generic_configure "--enable-iconv --enable-libxml2 --disable-docs --with-libiconv" # Use Libxml2 instead of Expat.
     do_make_and_make_install
@@ -830,8 +1089,8 @@ build_fontconfig() {
 }
 
 build_gmp() {
-  download_and_unpack_file https://gmplib.org/download/gmp/gmp-6.1.2.tar.xz
-  cd gmp-6.1.2
+  download_and_unpack_file https://ftp.gnu.org/pub/gnu/gmp/gmp-6.2.0.tar.xz
+  cd gmp-6.2.0
     #export CC_FOR_BUILD=/usr/bin/gcc # Are these needed?
     #export CPP_FOR_BUILD=usr/bin/cpp
     generic_configure "ABI=$bits_target"
@@ -843,7 +1102,7 @@ build_gmp() {
 
 build_librtmfp() {
   # needs some version of openssl...
-  # build_openssl-1.0.2 # fails OS X 
+  # build_openssl-1.0.2 # fails OS X
   build_openssl-1.1.1
   do_git_checkout https://github.com/MonaSolutions/librtmfp.git
   cd librtmfp_git/include/Base
@@ -852,6 +1111,8 @@ build_librtmfp() {
   cd librtmfp_git
     if [[ $compiler_flavors != "native" ]]; then
       apply_patch file://$patch_dir/rtmfp.static.cross.patch -p1 # works e48efb4f
+      apply_patch file://$patch_dir/rtmfp_capitalization.diff -p1 # cross for windows needs it if on linux...
+      apply_patch file://$patch_dir/librtmfp_xp.diff.diff -p1 # cross for windows needs it if on linux...
     else
       apply_patch file://$patch_dir/rtfmp.static.make.patch -p1
     fi
@@ -860,35 +1121,47 @@ build_librtmfp() {
     if [[ $compiler_flavors == "native" ]]; then
       sed -i.bak 's/-lrtmfp.*/-lrtmfp -lstdc++/' "$PKG_CONFIG_PATH/librtmfp.pc"
     else
-      sed -i.bak 's/-lrtmfp.*/-lrtmfp -lstdc++ -lWs2_32 -liphlpapi/' "$PKG_CONFIG_PATH/librtmfp.pc"
+      sed -i.bak 's/-lrtmfp.*/-lrtmfp -lstdc++ -lws2_32 -liphlpapi/' "$PKG_CONFIG_PATH/librtmfp.pc"
     fi
   cd ..
 }
 
 build_libnettle() {
-  download_and_unpack_file https://ftp.gnu.org/gnu/nettle/nettle-3.4.tar.gz
-  cd nettle-3.4
-    generic_configure "--disable-openssl --disable-documentation" # in case we have both gnutls and openssl, just use gnutls [except that gnutls uses this so...huh? https://github.com/rdp/ffmpeg-windows-build-helpers/issues/25#issuecomment-28158515
+  download_and_unpack_file https://ftp.gnu.org/gnu/nettle/nettle-3.6.tar.gz
+  cd nettle-3.6
+    local config_options="--disable-openssl --disable-documentation" # in case we have both gnutls and openssl, just use gnutls [except that gnutls uses this so...huh?
+    if [[ $compiler_flavors == "native" ]]; then
+      config_options+=" --libdir=${mingw_w64_x86_64_prefix}/lib" # Otherwise native builds install to /lib32 or /lib64 which gnutls doesn't find
+    fi
+    generic_configure "$config_options" # in case we have both gnutls and openssl, just use gnutls [except that gnutls uses this so...huh? https://github.com/rdp/ffmpeg-windows-build-helpers/issues/25#issuecomment-28158515
     do_make_and_make_install # What's up with "Configured with: ... --with-gmp=/cygdrive/d/ffmpeg-windows-build-helpers-master/native_build/windows/ffmpeg_local_builds/sandbox/cross_compilers/pkgs/gmp/gmp-6.1.2-i686" in 'config.log'? Isn't the 'gmp-6.1.2' above being used?
   cd ..
 }
 
+build_unistring() {
+  generic_download_and_make_and_install https://ftp.gnu.org/gnu/libunistring/libunistring-0.9.10.tar.xz
+}
+
+build_libidn2() {
+  generic_download_and_make_and_install https://ftp.gnu.org/gnu/libidn/libidn2-2.3.0.tar.gz
+}
+
 build_gnutls() {
-  download_and_unpack_file https://www.gnupg.org/ftp/gcrypt/gnutls/v3.5/gnutls-3.5.19.tar.xz
-  cd gnutls-3.5.19
+  download_and_unpack_file https://www.gnupg.org/ftp/gcrypt/gnutls/v3.6/gnutls-3.6.15.tar.xz
+  cd gnutls-3.6.15
     # --disable-cxx don't need the c++ version, in an effort to cut down on size... XXXX test size difference...
     # --enable-local-libopts to allow building with local autogen installed,
     # --disable-guile is so that if it finds guile installed (cygwin did/does) it won't try and link/build to it and fail...
     # libtasn1 is some dependency, appears provided is an option [see also build_libnettle]
     # pks #11 hopefully we don't need kit
-    generic_configure "--disable-doc --disable-tools --disable-cxx --disable-tests --disable-gtk-doc-html --disable-libdane --disable-nls --enable-local-libopts --disable-guile --with-included-libtasn1 --with-included-unistring --without-p11-kit"
+    generic_configure "--disable-doc --disable-tools --disable-cxx --disable-tests --disable-gtk-doc-html --disable-libdane --disable-nls --enable-local-libopts --disable-guile --with-included-libtasn1 --without-p11-kit"
     do_make_and_make_install
     if [[ $compiler_flavors != "native"  ]]; then
-      sed -i.bak 's/-lgnutls.*/-lgnutls -lcrypt32/' "$PKG_CONFIG_PATH/gnutls.pc" 
-    else
+      # libsrt doesn't know how to use its pkg deps :| https://github.com/Haivision/srt/issues/565
+      sed -i.bak 's/-lgnutls.*/-lgnutls -lcrypt32 -lnettle -lhogweed -lgmp -lidn2 -liconv -lunistring/' "$PKG_CONFIG_PATH/gnutls.pc"
       if [[ $OSTYPE == darwin* ]]; then
-        sed -i.bak 's/-lgnutls.*/-lgnutls -framework Security -framework Foundation/' "$PKG_CONFIG_PATH/gnutls.pc" 
-      fi # else linux do nothing...
+        sed -i.bak 's/-lgnutls.*/-lgnutls -framework Security -framework Foundation/' "$PKG_CONFIG_PATH/gnutls.pc"
+      fi
     fi
   cd ..
 }
@@ -957,7 +1230,7 @@ build_openssl-1.1.1() {
       if [[ $OSTYPE == darwin* ]]; then
         config_options+="darwin64-x86_64-cc "
       else
-        linux-generic64 # uh guess...
+        config_options+="linux-generic64 "
       fi
       local arch=native
     elif [ "$bits_target" = "32" ]; then
@@ -1059,13 +1332,11 @@ build_libsndfile() {
 }
 
 build_lame() {
-  do_git_checkout https://github.com/rbrito/lame.git
-  cd lame_git
-    apply_patch file://$patch_dir/lame3.patch # work on mtune=generic type builds :| TODO figure out why, report back to https://sourceforge.net/p/lame/bugs/443/
+  do_svn_checkout https://svn.code.sf.net/p/lame/svn/trunk/lame lame_svn r6474
+  cd lame_svn
+    sed -i.bak '1s/^\xEF\xBB\xBF//' libmp3lame/i386/nasm.h # Remove a UTF-8 BOM that breaks nasm if it's still there; should be fixed in trunk eventually https://sourceforge.net/p/lame/patches/81/
     generic_configure "--enable-nasm"
-    cpu_count=1 # can't handle it apparently... http://betterlogic.com/roger/2017/07/mp3lame-woe/
     do_make_and_make_install
-    cpu_count=$original_cpu_count
   cd ..
 }
 
@@ -1073,7 +1344,7 @@ build_twolame() {
   do_git_checkout https://github.com/njh/twolame.git
   cd twolame_git
     if [[ ! -f Makefile.am.bak ]]; then # Library only, front end refuses to build for some reason with git master
-      sed -i.bak "/^SUBDIRS/s/ frontend.*//" Makefile.am || exit 1 
+      sed -i.bak "/^SUBDIRS/s/ frontend.*//" Makefile.am || exit 1
     fi
     cpu_count=1 # maybe can't handle it http://betterlogic.com/roger/2017/07/mp3lame-woe/ comments
     generic_configure_make_install
@@ -1082,8 +1353,14 @@ build_twolame() {
 }
 
 build_fdk-aac() {
-  do_git_checkout https://github.com/mstorsjo/fdk-aac.git
-  cd fdk-aac_git
+local checkout_dir=fdk-aac_git
+    if [[ ! -z $fdk_aac_git_checkout_version ]]; then
+      checkout_dir+="_$fdk_aac_git_checkout_version"
+      do_git_checkout "https://github.com/mstorsjo/fdk-aac.git" $checkout_dir "refs/tags/$fdk_aac_git_checkout_version"
+    else
+      do_git_checkout "https://github.com/mstorsjo/fdk-aac.git" $checkout_dir
+    fi
+  cd $checkout_dir
     if [[ ! -f "configure" ]]; then
       autoreconf -fiv || exit 1
     fi
@@ -1097,7 +1374,7 @@ build_libopencore() {
 }
 
 build_libilbc() {
-  do_git_checkout https://github.com/TimothyGu/libilbc.git
+  do_git_checkout https://github.com/TimothyGu/libilbc.git libilbc_git v2.0.2
   cd libilbc_git
     generic_configure_make_install
   cd ..
@@ -1118,25 +1395,59 @@ build_libmodplug() {
 
 build_libgme() {
   # do_git_checkout https://bitbucket.org/mpyne/game-music-emu.git
-  download_and_unpack_file https://bitbucket.org/mpyne/game-music-emu/downloads/game-music-emu-0.6.2.tar.xz
-  cd game-music-emu-0.6.2
-    if [[ ! -f CMakeLists.txt.bak ]]; then
-      sed -i.bak "s/ __declspec.*//" gme/blargg_source.h # Needed for building shared FFmpeg libraries.
-    fi
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=0 -DENABLE_UBSAN=0"
+  download_and_unpack_file https://bitbucket.org/mpyne/game-music-emu/downloads/game-music-emu-0.6.3.tar.xz
+  cd game-music-emu-0.6.3
+    do_cmake_and_install "-DENABLE_UBSAN=0"
   cd ..
+}
+
+build_mingw_std_threads() {
+  do_git_checkout https://github.com/meganz/mingw-std-threads.git # it needs std::mutex too :|
+  cd mingw-std-threads_git
+    cp *.h "$mingw_w64_x86_64_prefix/include"
+  cd ..
+}
+
+build_opencv() {
+  build_mingw_std_threads
+  #do_git_checkout https://github.com/opencv/opencv.git # too big :|
+  download_and_unpack_file https://github.com/opencv/opencv/archive/3.4.5.zip opencv-3.4.5
+  mkdir -p opencv-3.4.5/build
+  cd opencv-3.4.5
+     apply_patch file://$patch_dir/opencv.detection_based.patch
+  cd ..
+  cd opencv-3.4.5/build
+    # could do more here, it seems to think it needs its own internal libwebp etc...
+    cpu_count=1
+    do_cmake_from_build_dir .. "-DWITH_FFMPEG=0 -DOPENCV_GENERATE_PKGCONFIG=1 -DHAVE_DSHOW=0" # https://stackoverflow.com/q/40262928/32453, no pkg config by default on "windows", who cares ffmpeg
+    do_make_and_make_install
+    cp unix-install/opencv.pc $PKG_CONFIG_PATH
+    cpu_count=$original_cpu_count
+  cd ../..
+}
+
+build_facebooktransform360() {
+  build_opencv
+  do_git_checkout https://github.com/facebook/transform360.git
+  cd transform360_git
+    apply_patch file://$patch_dir/transform360.pi.diff -p1
+  cd ..
+  cd transform360_git/Transform360
+    do_cmake ""
+    sed -i.bak "s/isystem/I/g" CMakeFiles/Transform360.dir/includes_CXX.rsp # weird stdlib.h error
+    do_make_and_make_install
+  cd ../..
 }
 
 build_libbluray() {
   unset JDK_HOME # #268 was causing failure
-  do_git_checkout https://git.videolan.org/git/libbluray.git
+  do_git_checkout https://code.videolan.org/videolan/libbluray.git
   cd libbluray_git
-    sed -i.bak 's_git://git.videolan.org/libudfread.git_https://git.videolan.org/git/libudfread.git_' .gitmodules
     if [[ ! -d .git/modules ]]; then
       git submodule update --init --remote # For UDF support [default=enabled], which strangely enough is in another repository.
     else
       local local_git_version=`git --git-dir=.git/modules/contrib/libudfread rev-parse HEAD`
-      local remote_git_version=`git ls-remote -h https://git.videolan.org/git/libudfread.git | sed "s/[[:space:]].*//"`
+      local remote_git_version=`git ls-remote -h https://code.videolan.org/videolan/libudfread.git | sed "s/[[:space:]].*//"`
       if [[ "$local_git_version" != "$remote_git_version" ]]; then
         echo "doing git clean -f"
         git clean -f # Throw away local changes; 'already_*' in this case.
@@ -1166,7 +1477,7 @@ build_libbs2b() {
   cd libbs2b-3.1.0
     sed -i.bak "s/AC_FUNC_MALLOC//" configure.ac # #270
     export LIBS=-lm # avoid pow failure linux native
-    generic_configure_make_install 
+    generic_configure_make_install
     unset LIBS
   cd ..
 }
@@ -1174,17 +1485,15 @@ build_libbs2b() {
 build_libsoxr() {
   do_git_checkout https://git.code.sf.net/p/soxr/code soxr_git
   cd soxr_git
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=0 -DHAVE_WORDS_BIGENDIAN_EXITCODE=0 -DWITH_OPENMP=0 -DBUILD_TESTS=0 -DBUILD_EXAMPLES=0"
+    do_cmake_and_install "-DHAVE_WORDS_BIGENDIAN_EXITCODE=0 -DWITH_OPENMP=0 -DBUILD_TESTS=0 -DBUILD_EXAMPLES=0"
   cd ..
 }
 
 build_libflite() {
-  download_and_unpack_file http://www.festvox.org/flite/packed/flite-2.0/flite-2.0.0-release.tar.bz2
-  cd flite-2.0.0-release
-    if [[ ! -f configure.bak ]]; then
-      sed -i.bak "s|i386-mingw32-|$cross_prefix|" configure
-      #sed -i.bak "/define const/i\#include <windows.h>" tools/find_sts_main.c # Needed for x86_64? Untested.
-      sed -i.bak "128,134d" main/Makefile # Library only. else fails with cannot copy bin/libflite or someodd
+  download_and_unpack_file http://www.festvox.org/flite/packed/flite-2.1/flite-2.1-release.tar.bz2
+  cd flite-2.1-release
+    apply_patch file://$patch_dir/flite-2.1.0_mingw-w64-fixes.patch
+    if [[ ! -f main/Makefile.bak ]]; then
       sed -i.bak "s/cp -pd/cp -p/" main/Makefile # friendlier cp for OS X
     fi
     generic_configure
@@ -1193,19 +1502,23 @@ build_libflite() {
 }
 
 build_libsnappy() {
-  do_git_checkout https://github.com/google/snappy.git snappy_git
+  do_git_checkout https://github.com/google/snappy.git snappy_git 1.1.8 # got weird failure once
   cd snappy_git
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=OFF -DBUILD_BINARY=OFF -DCMAKE_BUILD_TYPE=Release -DSNAPPY_BUILD_TESTS=OFF" # extra params from deadsix27 and from new cMakeLists.txt content
+    do_cmake_and_install "-DBUILD_BINARY=OFF -DCMAKE_BUILD_TYPE=Release -DSNAPPY_BUILD_TESTS=OFF" # extra params from deadsix27 and from new cMakeLists.txt content
     rm -f $mingw_w64_x86_64_prefix/lib/libsnappy.dll.a # unintall shared :|
   cd ..
 }
 
 build_vamp_plugin() {
-  download_and_unpack_file https://github.com/c4dm/vamp-plugin-sdk/archive/vamp-plugin-sdk-v2.7.1.tar.gz vamp-plugin-sdk-vamp-plugin-sdk-v2.7.1
-  cd vamp-plugin-sdk-vamp-plugin-sdk-v2.7.1
-    apply_patch file://$patch_dir/vamp-plugin-sdk-2.7.1_static-lib.diff
+  download_and_unpack_file https://github.com/c4dm/vamp-plugin-sdk/archive/vamp-plugin-sdk-v2.10.tar.gz vamp-plugin-sdk-vamp-plugin-sdk-v2.10
+  cd vamp-plugin-sdk-vamp-plugin-sdk-v2.10
+    apply_patch file://$patch_dir/vamp-plugin-sdk-2.10_static-lib.diff
+    if [[ $compiler_flavors != "native" && ! -f src/vamp-sdk/PluginAdapter.cpp.bak ]]; then
+      sed -i.bak "s/#include <mutex>/#include <mingw.mutex.h>/" src/vamp-sdk/PluginAdapter.cpp
+    fi
     if [[ ! -f configure.bak ]]; then # Fix for "'M_PI' was not declared in this scope" (see https://stackoverflow.com/a/29264536).
-      sed -i.bak "s/c++98/gnu++98/" configure
+      sed -i.bak "s/c++11/gnu++11/" configure
+      sed -i.bak "s/c++11/gnu++11/" Makefile.in
     fi
     do_configure "--host=$host_target --prefix=$mingw_w64_x86_64_prefix --disable-programs"
     do_make "install-static" # No need for 'do_make_install', because 'install-static' already has install-instructions.
@@ -1213,8 +1526,8 @@ build_vamp_plugin() {
 }
 
 build_fftw() {
-  download_and_unpack_file http://fftw.org/fftw-3.3.6-pl2.tar.gz
-  cd fftw-3.3.6-pl2
+  download_and_unpack_file http://fftw.org/fftw-3.3.8.tar.gz
+  cd fftw-3.3.8
     generic_configure "--disable-doc"
     do_make_and_make_install
   cd ..
@@ -1232,10 +1545,10 @@ build_libsamplerate() {
 }
 
 build_librubberband() {
-  do_git_checkout https://github.com/breakfastquay/rubberband.git
+  do_git_checkout https://github.com/breakfastquay/rubberband.git rubberband_git 18c06ab8c431854056407c467f4755f761e36a8e
   cd rubberband_git
     apply_patch file://$patch_dir/rubberband_git_static-lib.diff # create install-static target
-    do_configure "--host=$host_target --prefix=$mingw_w64_x86_64_prefix"
+    do_configure "--host=$host_target --prefix=$mingw_w64_x86_64_prefix --disable-ladspa"
     do_make "install-static AR=${cross_prefix}ar" # No need for 'do_make_install', because 'install-static' already has install-instructions.
     sed -i.bak 's/-lrubberband.*$/-lrubberband -lfftw3 -lsamplerate -lstdc++/' $PKG_CONFIG_PATH/rubberband.pc
   cd ..
@@ -1245,7 +1558,7 @@ build_frei0r() {
   do_git_checkout https://github.com/dyne/frei0r.git
   cd frei0r_git
     sed -i.bak 's/-arch i386//' CMakeLists.txt # OS X https://github.com/dyne/frei0r/issues/64
-    do_cmake_and_install
+    do_cmake_and_install "-DWITHOUT_OPENCV=1" # XXX could look at this more...
 
     mkdir -p $cur_dir/redist # Strip and pack shared libraries.
     if [ $bits_target = 32 ]; then
@@ -1267,25 +1580,55 @@ build_frei0r() {
   cd ..
 }
 
+build_svt-hevc() {
+  do_git_checkout https://github.com/OpenVisualCloud/SVT-HEVC.git
+  mkdir -p SVT-HEVC_git/release
+  cd SVT-HEVC_git/release
+    do_cmake_from_build_dir .. "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR=AMD64"
+    do_make_and_make_install
+  cd ../..
+}
+
+build_svt-av1() {
+  do_git_checkout https://github.com/OpenVisualCloud/SVT-AV1.git
+  cd SVT-AV1_git
+  cd Build
+    do_cmake_from_build_dir .. "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR=AMD64"
+    do_make_and_make_install
+  cd ../..
+}
+
+build_svt-vp9() {
+  do_git_checkout https://github.com/OpenVisualCloud/SVT-VP9.git
+  cd SVT-VP9_git
+  cd Build
+    do_cmake_from_build_dir .. "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR=AMD64"
+    do_make_and_make_install
+  cd ../..
+}
+
 build_vidstab() {
   do_git_checkout https://github.com/georgmartius/vid.stab.git vid.stab_git
   cd vid.stab_git
-    if [[ ! -f CMakeLists.txt.bak ]]; then # Change CFLAGS.
-      sed -i.bak "s/O3/O2/;s/ -fPIC//" CMakeLists.txt
-    fi
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=0 -DUSE_OMP=0" # '-DUSE_OMP' is on by default, but somehow libgomp ('cygwin_local_install/lib/gcc/i686-pc-cygwin/5.4.0/include/omp.h') can't be found, so '-DUSE_OMP=0' to prevent a compilation error.
+    do_cmake_and_install "-DUSE_OMP=0" # '-DUSE_OMP' is on by default, but somehow libgomp ('cygwin_local_install/lib/gcc/i686-pc-cygwin/5.4.0/include/omp.h') can't be found, so '-DUSE_OMP=0' to prevent a compilation error.
   cd ..
 }
 
 build_libmysofa() {
-  do_git_checkout https://github.com/hoene/libmysofa.git
+  do_git_checkout https://github.com/hoene/libmysofa.git libmysofa_git
   cd libmysofa_git
-    do_cmake_and_install "-DBUILD_SHARED_LIBS=0 -DBUILD_TESTS=0"
+    local cmake_params="-DBUILD_TESTS=0"
+    if [[ $compiler_flavors == "native" ]]; then
+      cmake_params+=" -DCODE_COVERAGE=0"
+    fi
+    do_cmake "$cmake_params"
+    apply_patch file://$patch_dir/libmysofa.patch -p1 # maybe unneeded now that double cmake no longer...hmm...
+    do_make_and_make_install
   cd ..
 }
 
 build_libcaca() {
-  do_git_checkout https://github.com/cacalabs/libcaca.git libcaca_git f1267fbd3cd3635a
+  do_git_checkout https://github.com/cacalabs/libcaca.git libcaca_git 813baea7a7bc28986e474541dd1080898fac14d7
   cd libcaca_git
     apply_patch file://$patch_dir/libcaca_git_stdio-cruft.diff -p1 # Fix WinXP incompatibility.
     cd caca
@@ -1294,6 +1637,9 @@ build_libcaca() {
     cd ..
     generic_configure "--libdir=$mingw_w64_x86_64_prefix/lib --disable-csharp --disable-java --disable-cxx --disable-python --disable-ruby --disable-doc --disable-cocoa --disable-ncurses"
     do_make_and_make_install
+    if [[ $compiler_flavors == "native" ]]; then
+      sed -i.bak "s/-lcaca.*/-lcaca -lX11/" $PKG_CONFIG_PATH/caca.pc
+    fi
   cd ..
 }
 
@@ -1318,17 +1664,38 @@ build_zvbi() {
 }
 
 build_fribidi() {
-  do_git_checkout https://github.com/fribidi/fribidi.git
-  cd fribidi_git
-    cpu_count=1 # needed apparently with git master
+  download_and_unpack_file https://github.com/fribidi/fribidi/releases/download/v1.0.9/fribidi-1.0.9.tar.xz # Get c2man errors building from repo
+  cd fribidi-1.0.9
     generic_configure "--disable-debug --disable-deprecated --disable-docs"
     do_make_and_make_install
-    cpu_count=$original_cpu_count
+  cd ..
+}
+
+build_libsrt() {
+  # do_git_checkout https://github.com/Haivision/srt.git
+  #cd srt_git
+  #download_and_unpack_file https://codeload.github.com/Haivision/srt/tar.gz/v1.3.2 srt-1.3.2
+  download_and_unpack_file https://github.com/Haivision/srt/archive/v1.4.1.tar.gz srt-1.4.1
+  cd srt-1.4.1
+    if [[ $compiler_flavors != "native" ]]; then
+      do_cmake "-DUSE_GNUTLS=ON -DENABLE_SHARED=OFF"
+      apply_patch file://$patch_dir/srt.app.patch -p1
+    else
+      do_cmake "-DUSE_GNUTLS=ON -DENABLE_SHARED=OFF -DENABLE_CXX11=OFF"
+    fi
+    do_make_and_make_install
   cd ..
 }
 
 build_libass() {
   do_git_checkout_and_make_install https://github.com/libass/libass.git
+}
+
+build_libaribb24() {
+  do_git_checkout https://github.com/nkoriyama/aribb24
+  cd aribb24
+    generic_configure_make_install
+  cd ..
 }
 
 build_libxavs() {
@@ -1343,22 +1710,39 @@ build_libxavs() {
   cd ..
 }
 
+build_libxavs2() {
+  do_git_checkout https://github.com/pkuvcl/xavs2.git
+  cd xavs2_git/build/linux
+  do_configure "--cross-prefix=$cross_prefix --host=$host_target --prefix=$mingw_w64_x86_64_prefix --enable-pic"
+  do_make_and_make_install
+  cd ../../..
+}
+
+build_libdavs2() {
+  do_git_checkout https://github.com/pkuvcl/davs2.git
+  cd davs2_git/build/linux
+  if [[ $host_target == 'i686-w64-mingw32' ]]; then
+    do_configure "--cross-prefix=$cross_prefix --host=$host_target --prefix=$mingw_w64_x86_64_prefix --enable-pic --disable-asm"
+  else
+    do_configure "--cross-prefix=$cross_prefix --host=$host_target --prefix=$mingw_w64_x86_64_prefix --enable-pic"
+  fi
+  do_make_and_make_install
+  cd ../../..
+}
+
 build_libxvid() {
-  download_and_unpack_file http://downloads.xvid.org/downloads/xvidcore-1.3.4.tar.gz xvidcore
+  download_and_unpack_file https://downloads.xvid.com/downloads/xvidcore-1.3.7.tar.gz xvidcore
   cd xvidcore/build/generic
-    apply_patch file://$patch_dir/xvidcore-1.3.4_static-lib.diff
+    apply_patch file://$patch_dir/xvidcore-1.3.7_static-lib.patch
     do_configure "--host=$host_target --prefix=$mingw_w64_x86_64_prefix" # no static option...
-    #sed -i.bak "s/-mno-cygwin//" platform.inc # remove old compiler flag that now apparently breaks us # Not needed for static library, but neither anymore for shared library (see 'configure#L5010').
-    cpu_count=1 # possibly can't build this multi-thread ? http://betterlogic.com/roger/2014/02/xvid-build-woe/
     do_make_and_make_install
-    cpu_count=$original_cpu_count
   cd ../../..
 }
 
 build_libvpx() {
   do_git_checkout https://chromium.googlesource.com/webm/libvpx.git
   cd libvpx_git
-     apply_patch https://raw.githubusercontent.com/rdp/ffmpeg-windows-build-helpers/master/patches/vpx_160_semaphore.patch -p1 # perhaps someday can remove this after 1.6.0 or mingw fixes it LOL
+     apply_patch file://$patch_dir/vpx_160_semaphore.patch -p1 # perhaps someday can remove this after 1.6.0 or mingw fixes it LOL
     if [[ $compiler_flavors == "native" ]]; then
       local config_options=""
     elif [[ "$bits_target" = "32" ]]; then
@@ -1366,16 +1750,16 @@ build_libvpx() {
     else
       local config_options="--target=x86_64-win64-gcc"
     fi
-    export CROSS="$cross_prefix"
-    do_configure "$config_options --prefix=$mingw_w64_x86_64_prefix --enable-static --disable-shared --disable-examples --disable-tools --disable-docs --disable-unit-tests --enable-vp9-highbitdepth --extra-cflags=-fno-asynchronous-unwind-tables" # fno for Error: invalid register for .seh_savexmm
+    export CROSS="$cross_prefix"  # XXX investigate/report ssse3? huh wuh?
+    do_configure "$config_options --prefix=$mingw_w64_x86_64_prefix --disable-ssse3 --enable-static --disable-shared --disable-examples --disable-tools --disable-docs --disable-unit-tests --enable-vp9-highbitdepth --extra-cflags=-fno-asynchronous-unwind-tables --extra-cflags=-mstackrealign" # fno for Error: invalid register for .seh_savexmm
     do_make_and_make_install
     unset CROSS
   cd ..
 }
 
 build_libaom() {
-  do_git_checkout https://aomedia.googlesource.com/aom aom_git df7131064bf # avoid collision with vp9 :|
-  if [[ $compiler_flavors == "native" ]]; then 
+  do_git_checkout https://aomedia.googlesource.com/aom aom_git
+  if [[ $compiler_flavors == "native" ]]; then
     local config_options=""
   elif [ "$bits_target" = "32" ]; then
     local config_options="-DCMAKE_TOOLCHAIN_FILE=../build/cmake/toolchains/x86-mingw-gcc.cmake -DAOM_TARGET_CPU=x86"
@@ -1389,85 +1773,97 @@ build_libaom() {
   cd ../..
 }
 
+build_dav1d() {
+  do_git_checkout https://code.videolan.org/videolan/dav1d.git libdav1d
+  cd libdav1d
+    if [[ $bits_target == 32 || $bits_target == 64 ]]; then # XXX why 64???
+      apply_patch file://$patch_dir/david_no_asm.patch -p1 # XXX report
+    fi
+    cpu_count=1 # XXX report :|
+    local meson_options="--prefix=${mingw_w64_x86_64_prefix} --libdir=${mingw_w64_x86_64_prefix}/lib --buildtype=release --default-library=static . build"
+    if [[ $compiler_flavors != "native" ]]; then
+      meson_options+=" --cross-file=${top_dir}/meson-cross.mingw.txt"
+    fi
+    do_meson "$meson_options"
+    do_ninja_and_ninja_install
+    cp build/src/libdav1d.a $mingw_w64_x86_64_prefix/lib || exit 1 # avoid 'run ranlib' weird failure, possibly older meson's https://github.com/mesonbuild/meson/issues/4138 :|
+    cpu_count=$original_cpu_count
+  cd ..
+}
+
+build_avisynth() {
+  do_git_checkout https://github.com/AviSynth/AviSynthPlus.git avisynth_git
+  mkdir -p avisynth_git/avisynth-build
+  cd avisynth_git/avisynth-build
+    do_cmake_from_build_dir .. -DHEADERS_ONLY:bool=on
+    do_make_install
+  cd ../..
+}
+
 build_libx265() {
-  # the only one that uses mercurial, so there's some extra initial junk in this method... XXX needs some cleanup :|
-  local checkout_dir=x265
-  if [[ $high_bitdepth == "y" ]]; then
-    checkout_dir=x265_high_bitdepth_10
+  local checkout_dir=x265_all_bitdepth
+  if [[ ! -z $x265_git_checkout_version ]]; then
+    checkout_dir+="_$x265_git_checkout_version"
+    do_git_checkout "https://github.com/videolan/x265" $checkout_dir "$x265_git_checkout_version"
   fi
+  if [[ $prefer_stable = "n" ]] && [[ -z $x265_git_checkout_version ]] ; then
+    do_git_checkout "https://github.com/videolan/x265" $checkout_dir "origin/master"
+  fi
+  if [[ $prefer_stable = "y" ]] && [[ -z $x265_git_checkout_version ]] ; then
+    do_git_checkout "https://github.com/videolan/x265" $checkout_dir "origin/stable"
+  fi
+  cd $checkout_dir
 
-  if [[ $prefer_stable = "n" ]]; then
-    local old_hg_version
-    if [[ -d $checkout_dir ]]; then
-      cd $checkout_dir
-      if [[ $git_get_latest = "y" ]]; then
-        echo "doing hg pull -u x265"
-        old_hg_version=`hg --debug id -i`
-        hg pull -u || exit 1
-        hg update || exit 1 # guess you need this too if no new changes are brought down [what the...]
-      else
-        echo "not doing hg pull x265"
-        old_hg_version=`hg --debug id -i`
-      fi
-    else
-      echo "doing hg clone x265"
-      hg clone https://bitbucket.org/multicoreware/x265 $checkout_dir || exit 1
-      cd $checkout_dir
-      old_hg_version=none-yet
-    fi
-    cd source
+  local cmake_params="-DENABLE_SHARED=0" # build x265.exe
 
-    local new_hg_version=`hg --debug id -i`
-    if [[ "$old_hg_version" != "$new_hg_version" ]]; then
-      echo "got upstream hg changes, forcing rebuild...x265"
-      rm -f already*
-    else
-      echo "still at hg $new_hg_version x265"
-    fi
-  else
-    # i.e. prefer_stable == "y" TODO clean this up these two branches are pretty similar...
-    local old_hg_version
-    if [[ -d $checkout_dir ]]; then
-      cd $checkout_dir
-      if [[ $git_get_latest = "y" ]]; then
-        echo "doing hg pull -u x265"
-        old_hg_version=`hg --debug id -i`
-        hg pull -u || exit 1
-        hg update || exit 1 # guess you need this too if no new changes are brought down [what the...]
-      else
-        echo "not doing hg pull x265"
-        old_hg_version=`hg --debug id -i`
-      fi
-    else
-      echo "doing hg clone x265"
-      hg clone https://bitbucket.org/multicoreware/x265 -r stable $checkout_dir || exit 1
-      cd $checkout_dir
-      old_hg_version=none-yet
-    fi
-    cd source
-
-    local new_hg_version=`hg --debug id -i`
-    if [[ "$old_hg_version" != "$new_hg_version" ]]; then
-      echo "got upstream hg changes, forcing rebuild...x265"
-      rm -f already*
-    else
-      echo "still at hg $new_hg_version x265"
-    fi
-  fi # dont with prefer_stable = [y|n]
-
-  local cmake_params="-DENABLE_SHARED=0 -DENABLE_CLI=1" # build x265.exe
   if [ "$bits_target" = "32" ]; then
     cmake_params+=" -DWINXP_SUPPORT=1" # enable windows xp/vista compatibility in x86 build
-    cmake_params="$cmake_params -DENABLE_ASSEMBLY=OFF" # apparently required or build fails
   fi
-  if [[ $high_bitdepth == "y" ]]; then
-    cmake_params+=" -DHIGH_BIT_DEPTH=1" # Enable 10 bits (main10) and 12 bits (???) per pixels profiles.
-  fi
+  mkdir -p 8bit 10bit 12bit
 
-  do_cmake "$cmake_params"
+  # Build 12bit (main12)
+  cd 12bit
+  local cmake_12bit_params="$cmake_params -DENABLE_CLI=0 -DHIGH_BIT_DEPTH=1 -DMAIN12=1 -DEXPORT_C_API=0"
+  if [ "$bits_target" = "32" ]; then
+    cmake_12bit_params="$cmake_12bit_params -DENABLE_ASSEMBLY=OFF" # apparently required or build fails
+  fi
+  do_cmake_from_build_dir ../source "$cmake_12bit_params"
   do_make
-  echo force reinstall in case bit depth changed at all :|
-  rm already_ran_make_install*
+  cp libx265.a ../8bit/libx265_main12.a
+
+  # Build 10bit (main10)
+  cd ../10bit
+  local cmake_10bit_params="$cmake_params -DENABLE_CLI=0 -DHIGH_BIT_DEPTH=1 -DENABLE_HDR10_PLUS=1 -DEXPORT_C_API=0"
+  if [ "$bits_target" = "32" ]; then
+    cmake_10bit_params="$cmake_10bit_params -DENABLE_ASSEMBLY=OFF" # apparently required or build fails
+  fi
+  do_cmake_from_build_dir ../source "$cmake_10bit_params"
+  do_make
+  cp libx265.a ../8bit/libx265_main10.a
+
+  # Build 8 bit (main) with linked 10 and 12 bit then install
+  cd ../8bit
+  cmake_params="$cmake_params -DENABLE_CLI=1 -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT=1 -DLINKED_12BIT=1"
+  if [[ $compiler_flavors == "native" && $OSTYPE != darwin* ]]; then
+    cmake_params+=" -DENABLE_SHARED=0 -DEXTRA_LIB='$(pwd)/libx265_main10.a;$(pwd)/libx265_main12.a;-ldl'" # Native multi-lib CLI builds are slightly broken right now; other option is to -DENABLE_CLI=0, but this seems to work (https://bitbucket.org/multicoreware/x265/issues/520)
+  else
+    cmake_params+=" -DEXTRA_LIB='$(pwd)/libx265_main10.a;$(pwd)/libx265_main12.a'"
+  fi
+  do_cmake_from_build_dir ../source "$cmake_params"
+  do_make
+  mv libx265.a libx265_main.a
+  if [[ $compiler_flavors == "native" && $OSTYPE == darwin* ]]; then
+    libtool -static -o libx265.a libx265_main.a libx265_main10.a libx265_main12.a 2>/dev/null
+  else
+    ${cross_prefix}ar -M <<EOF
+CREATE libx265.a
+ADDLIB libx265_main.a
+ADDLIB libx265_main10.a
+ADDLIB libx265_main12.a
+SAVE
+END
+EOF
+  fi
   do_make_install
   cd ../..
 }
@@ -1502,17 +1898,13 @@ build_libx264() {
   fi
 
   local x264_profile_guided=n # or y -- haven't gotten this proven yet...TODO
-  if [[ $high_bitdepth == "y" ]]; then
-    checkout_dir="${checkout_dir}_high_bitdepth_10"
-  else
-    checkout_dir="${checkout_dir}_normal_bitdepth"
-  fi
+  checkout_dir="${checkout_dir}_all_bitdepth"
 
-  #if [[ $prefer_stable = "n" ]]; then
-  #  do_git_checkout "http://git.videolan.org/git/x264.git" $checkout_dir "origin/master" # During 'configure': "Found no assembler. Minimum version is nasm-2.13" so disable for now...
-  #else
-    do_git_checkout "http://git.videolan.org/git/x264.git" $checkout_dir  "origin/stable" # or "origin/stable" nasm again
-  #fi
+  if [[ $prefer_stable = "n" ]]; then
+    do_git_checkout "https://code.videolan.org/videolan/x264.git" $checkout_dir "origin/master" # During 'configure': "Found no assembler. Minimum version is nasm-2.13" so disable for now...
+  else
+    do_git_checkout "https://code.videolan.org/videolan/x264.git" $checkout_dir  "origin/stable" # or "origin/stable" nasm again
+  fi
   cd $checkout_dir
     if [[ ! -f configure.bak ]]; then # Change CFLAGS.
       sed -i.bak "s/O3 -/O2 -/" configure
@@ -1522,9 +1914,7 @@ build_libx264() {
     if [[ $build_x264_with_libav == "n" ]]; then
       configure_flags+=" --disable-lavf" # lavf stands for libavformat, there is no --enable-lavf option, either auto or disable...
     fi
-    if [[ $high_bitdepth == "y" ]]; then
-      configure_flags+=" --bit-depth=10" # all?
-    fi
+    configure_flags+=" --bit-depth=all"
     for i in $CFLAGS; do
       configure_flags+=" --extra-cflags=$i" # needs it this way seemingly :|
     done
@@ -1541,11 +1931,9 @@ build_libx264() {
       sed -i.bak "s_\\, ./x264_, wine ./x264_" Makefile # in case they have wine auto-run disabled http://askubuntu.com/questions/344088/how-to-ensure-wine-does-not-auto-run-exe-files
       do_make_and_make_install "fprofiled VIDS=example.y4m" # guess it has its own make fprofiled, so we don't need to manually add -fprofile-generate here...
     else
-      # normal path
+      # normal path non profile guided
       do_configure "$configure_flags"
       do_make
-      echo force reinstall in case bit depth changed at all :|
-      rm already_ran_make_install*
       do_make_install
     fi
 
@@ -1569,7 +1957,6 @@ build_libdvdread() {
   cd libdvdread-4.9.9
     # XXXX better CFLAGS here...
     generic_configure "CFLAGS=-DHAVE_DVDCSS_DVDCSS_H LDFLAGS=-ldvdcss --enable-dlfcn" # vlc patch: "--enable-libdvdcss" # XXX ask how I'm *supposed* to do this to the dvdread peeps [svn?]
-    #apply_patch file://$patch_dir/dvdread-win32.patch # has been reported to them...
     do_make_and_make_install
     sed -i.bak 's/-ldvdread.*/-ldvdread -ldvdcss/' "$PKG_CONFIG_PATH/dvdread.pc"
   cd ..
@@ -1591,13 +1978,24 @@ build_libdvdcss() {
 }
 
 build_libjpeg_turbo() {
-  download_and_unpack_file https://sourceforge.net/projects/libjpeg-turbo/files/1.5.0/libjpeg-turbo-1.5.0.tar.gz
-  cd libjpeg-turbo-1.5.0
-    #do_cmake_and_install "-DNASM=yasm" # couldn't figure out a static only build with cmake...maybe you can these days dunno
-    generic_configure "NASM=yasm"
-    do_make_and_make_install
-    sed -i.bak 's/typedef long INT32/typedef long XXINT32/' "$mingw_w64_x86_64_prefix/include/jmorecfg.h" # breaks VLC build without this...freaky...theoretically using cmake instead would be enough, but that installs .dll.a file... XXXX maybe no longer needed :|
-  cd ..
+  do_git_checkout https://github.com/libjpeg-turbo/libjpeg-turbo libjpeg-turbo_git
+  cd libjpeg-turbo_git
+    local cmake_params="-DENABLE_SHARED=0 -DCMAKE_ASM_NASM_COMPILER=yasm"
+    if [[ $compiler_flavors != "native" ]]; then
+      cmake_params+=" -DCMAKE_TOOLCHAIN_FILE=toolchain.cmake"
+      local target_proc=AMD64
+      if [ "$bits_target" = "32" ]; then
+        target_proc=X86
+      fi
+      cat > toolchain.cmake << EOF
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR ${target_proc})
+set(CMAKE_C_COMPILER ${cross_prefix}gcc)
+set(CMAKE_RC_COMPILER ${cross_prefix}windres)
+EOF
+    fi
+    do_cmake_and_install "$cmake_params"
+    cd ..
 }
 
 build_libproxy() {
@@ -1729,6 +2127,64 @@ reset_cflags() {
   export CFLAGS=$original_cflags
 }
 
+reset_cppflags() {
+  export CPPFLAGS=$original_cppflags
+}
+
+build_meson_cross() {
+  local cpu_family="x86_64"
+  if [ $bits_target = 32 ]; then
+    cpu_family="x86"
+  fi
+  rm -fv meson-cross.mingw.txt
+  cat >> meson-cross.mingw.txt << EOF
+[binaries]
+c = '${cross_prefix}gcc'
+cpp = '${cross_prefix}g++'
+ld = '${cross_prefix}ld'
+ar = '${cross_prefix}ar'
+strip = '${cross_prefix}strip'
+pkgconfig = '${cross_prefix}pkg-config'
+nm = '${cross_prefix}nm'
+windres = '${cross_prefix}windres'
+
+[host_machine]
+system = 'windows'
+cpu_family = '$cpu_family'
+cpu = '$cpu_family'
+endian = 'little'
+EOF
+  mv -v meson-cross.mingw.txt ../..
+}
+
+get_local_meson_cross_with_propeties() {
+  local local_dir="$1"
+  local c_args=
+  local cpp_args=
+  local link_args=
+  if [[ -z $local_dir ]]; then
+    local_dir="."
+  fi
+  cp ${top_dir}/meson-cross.mingw.txt "$local_dir"
+  if [[ -n "$CFLAGS" ]]; then
+    c_args="'$(echo ${CFLAGS} | sed "s/ /\',\'/g")'"
+  fi
+  if [[ -n "$CXXFLAGS" ]]; then
+    cpp_args="'$(echo ${CXXFLAGS} | sed "s/ /\',\'/g")'"
+  fi
+  if [[ -n "$LDFLAGS" ]]; then
+    link_args="'$(echo ${LDFLAGS} | sed "s/ /\',\'/g")'"
+  fi
+  cat >> meson-cross.mingw.txt << EOF
+
+[properties]
+c_args = [$c_args]
+c_link_args = [$link_args]
+cpp_args = [$cpp_args]
+cpp_link_args = [$link_args]
+EOF
+}
+
 build_mplayer() {
   # pre requisites
   build_libjpeg_turbo
@@ -1766,7 +2222,8 @@ build_mp4box() { # like build_gpac
     sed -i.bak "s/`uname -s`/MINGW32/g" configure
     # XXX do I want to disable more things here?
     # ./sandbox/cross_compilers/mingw-w64-i686/bin/i686-w64-mingw32-sdl-config
-    generic_configure "--static-mp4box --enable-static-bin --disable-oss-audio --extra-ldflags=-municode --disable-x11 --sdl-cfg=${cross_prefix}sdl-config"
+    generic_configure "--static-build --static-bin --disable-oss-audio --extra-ldflags=-municode --disable-x11 --sdl-cfg=${cross_prefix}sdl-config"
+    ./check_revision.sh
     # I seem unable to pass 3 libs into the same config line so do it with sed...
     sed -i.bak "s/EXTRALIBS=.*/EXTRALIBS=-lws2_32 -lwinmm -lz/g" config.mak
     cd src
@@ -1810,9 +2267,6 @@ build_ffmpeg() {
   if [[ "$non_free" = "y" ]]; then
     output_dir+="_with_fdk_aac"
   fi
-  if [[ $high_bitdepth == "y" ]]; then
-    output_dir+="_x26x_high_bitdepth"
-  fi
   if [[ $build_intel_qsv == "n" ]]; then
     output_dir+="_xp_compat"
   fi
@@ -1820,22 +2274,45 @@ build_ffmpeg() {
     output_dir+="_lgpl"
   fi
   if [[ ! -z $ffmpeg_git_checkout_version ]]; then
-    output_dir+="_$ffmpeg_git_checkout_version"
+    local output_dir_version=$(echo ${ffmpeg_git_checkout_version} | sed "s/\//_/g")
+    output_dir+="_$output_dir_version"
   fi
 
   local postpend_configure_opts=""
+  local postpend_prefix=""
   # can't mix and match --enable-static --enable-shared unfortunately, or the final executable seems to just use shared if the're both present
   if [[ $1 == "shared" ]]; then
     output_dir+="_shared"
-    postpend_configure_opts="--enable-shared --disable-static --prefix=$(pwd)/${output_dir}"
+    postpend_prefix="$(pwd)/${output_dir}"
   else
-    postpend_configure_opts="--enable-static --disable-shared --prefix=$mingw_w64_x86_64_prefix"
+    postpend_prefix="${mingw_w64_x86_64_prefix}"
   fi
 
-  do_git_checkout https://github.com/FFmpeg/FFmpeg.git $output_dir $ffmpeg_git_checkout_version
+
+  #TODO allow using local source directory
+  if [[ -z $ffmpeg_source_dir ]]; then
+    do_git_checkout $ffmpeg_git_checkout $output_dir $ffmpeg_git_checkout_version || exit 1
+  else
+    output_dir="${ffmpeg_source_dir}"
+    postpend_prefix="${output_dir}"
+  fi
+
+  if [[ $1 == "shared" ]]; then
+    postpend_configure_opts="--enable-shared --disable-static --prefix=${postpend_prefix}"
+  else
+    postpend_configure_opts="--enable-static --disable-shared --prefix=${postpend_prefix}"
+  fi
+
   cd $output_dir
     apply_patch file://$patch_dir/frei0r_load-shared-libraries-dynamically.diff
+    apply_patch file://$patch_dir/ffmpeg-windres-fix.patch
+    if [ "$bits_target" != "32" ]; then
+    #SVT-HEVC
+    git apply "../SVT-HEVC_git/ffmpeg_plugin/0001-lavc-svt_hevc-add-libsvt-hevc-encoder-wrapper.patch"
+    git apply "$patch_dir/SVT-HEVC-0002-doc-Add-libsvt_hevc-encoder-docs.patch"  # upstream patch does not apply on current ffmpeg master
+    git apply "../SVT-VP9_git/ffmpeg_plugin/master-0001-Add-ability-for-ffmpeg-to-run-svt-vp9.patch"
 
+    fi
     if [ "$bits_target" = "32" ]; then
       local arch=x86
     else
@@ -1845,16 +2322,37 @@ build_ffmpeg() {
     init_options="--pkg-config=pkg-config --pkg-config-flags=--static --extra-version=ffmpeg-windows-build-helpers --enable-version3 --disable-debug --disable-w32threads"
     if [[ $compiler_flavors != "native" ]]; then
       init_options+=" --arch=$arch --target-os=mingw32 --cross-prefix=$cross_prefix"
+    else
+      if [[ $OSTYPE != darwin* ]]; then
+        unset PKG_CONFIG_LIBDIR # just use locally packages for all the xcb stuff for now, you need to install them locally first...
+        init_options+=" --enable-libv4l2 --enable-libxcb --enable-libxcb-shm --enable-libxcb-xfixes --enable-libxcb-shape "
+      fi
     fi
     if [[ `uname` =~ "5.1" ]]; then
       init_options+=" --disable-schannel"
       # Fix WinXP incompatibility by disabling Microsoft's Secure Channel, because Windows XP doesn't support TLS 1.1 and 1.2, but with GnuTLS or OpenSSL it does.  XP compat!
     fi
-    config_options="$init_options --enable-libcaca --enable-gray --enable-libtesseract --enable-fontconfig --enable-gmp --enable-gnutls --enable-libass --enable-libbluray --enable-libbs2b --enable-libflite --enable-libfreetype --enable-libfribidi --enable-libgme --enable-libgsm --enable-libilbc --enable-libmodplug --enable-libmp3lame --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopus --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enable-libtwolame --enable-libvo-amrwbenc --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libzimg --enable-libzvbi --enable-libmysofa --enable-libaom --enable-libopenjpeg  --enable-libopenh264 --enable-liblensfun"
-    if [[ $compiler_flavors != "native" ]]; then
-      config_options+=" --enable-nvenc --enable-nvdec" # don't work OS X 
+    config_options="$init_options --enable-libcaca --enable-gray --enable-libtesseract --enable-fontconfig --enable-gmp --enable-gnutls --enable-libass --enable-libbluray --enable-libbs2b --enable-libflite --enable-libfreetype --enable-libfribidi --enable-libgme --enable-libgsm --enable-libilbc --enable-libmodplug --enable-libmp3lame --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopus --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enable-libtwolame --enable-libvo-amrwbenc --enable-libvorbis --enable-libwebp --enable-libzimg --enable-libzvbi --enable-libmysofa --enable-libopenjpeg  --enable-libopenh264 --enable-liblensfun  --enable-libvmaf --enable-libsrt --enable-demuxer=dash --enable-libxml2 --enable-opengl --enable-libdav1d --enable-cuda-llvm"
+
+    if [ "$bits_target" != "32" ]; then
+      config_options+=" --enable-libsvthevc"
+      config_options+=" --enable-libsvtav1"
+      config_options+=" --enable-libsvtvp9"
     fi
 
+    #aom must be disabled to use SVT-AV1
+    config_options+=" --enable-libaom"
+    #config_options+=" --enable-libsvtav1" #not currently working but compiles if configured
+
+    #libxvid must be disabled to use SVT-VP9 (26 lines below); working alongside libvpx was added in https://github.com/OpenVisualCloud/SVT-VP9/pull/71 so vpx no longer needs to be disabled
+    config_options+=" --enable-libvpx"
+    #config_options+=" --enable-libsvtvp9" #not currently working but compiles if configured
+
+    if [[ $compiler_flavors != "native" ]]; then
+      config_options+=" --enable-nvenc --enable-nvdec" # don't work OS X
+    fi
+
+    config_options+=" --extra-libs=-lharfbuzz" #  grr...needed for pre x264 build???
     config_options+=" --extra-libs=-lm" # libflite seemed to need this linux native...and have no .pc file huh?
     config_options+=" --extra-libs=-lpthread" # for some reason various and sundry needed this linux native
 
@@ -1865,22 +2363,26 @@ build_ffmpeg() {
       config_options+=" --enable-amf" # This is actually autodetected but for consistency.. we might as well set it.
     fi
 
-    if [[ $build_intel_qsv = y ]]; then
+    if [[ $build_intel_qsv = y && $compiler_flavors != "native" ]]; then # Broken for native builds right now: https://github.com/lu-zero/mfx_dispatch/issues/71
       config_options+=" --enable-libmfx"
     else
       config_options+=" --disable-libmfx"
     fi
     if [[ $enable_gpl == 'y' ]]; then
-      config_options+=" --enable-gpl --enable-avisynth --enable-frei0r --enable-filter=frei0r --enable-librubberband --enable-libvidstab --enable-libx264 --enable-libx265 --enable-libxvid"
+      config_options+=" --enable-gpl --enable-frei0r --enable-filter=frei0r --enable-librubberband --enable-libvidstab --enable-libx264 --enable-libx265 --enable-avisynth --enable-libaribb24"
+      config_options+=" --enable-libxvid --enable-libdavs2"
+      if [[ $host_target != 'i686-w64-mingw32' ]]; then
+        config_options+=" --enable-libxavs2"
+      fi
       if [[ $compiler_flavors != "native" ]]; then
-        config_options+=" --enable-libxavs" # don't compile OS X 
+        config_options+=" --enable-libxavs" # don't compile OS X
       fi
     fi
     local licensed_gpl=n # lgpl build with libx264 included for those with "commercial" license :)
     if [[ $licensed_gpl == 'y' ]]; then
       apply_patch file://$patch_dir/x264_non_gpl.diff -p1
       config_options+=" --enable-libx264"
-    fi 
+    fi
     # other possibilities:
     #   --enable-w32threads # [worse UDP than pthreads, so not using that]
     config_options+=" --enable-avresample" # guess this is some kind of libav specific thing (the FFmpeg fork) but L-Smash needs it so why not always build it :)
@@ -1892,8 +2394,12 @@ build_ffmpeg() {
     config_options+=" $postpend_configure_opts"
 
     if [[ "$non_free" = "y" ]]; then
-      config_options+=" --enable-nonfree --enable-decklink --enable-libfdk-aac"
-      # other possible options: --enable-openssl [unneeded since we use gnutls]
+      config_options+=" --enable-nonfree --enable-libfdk-aac"
+
+      if [[ $compiler_flavors != "native" ]]; then
+        config_options+=" --enable-decklink" # Error finding rpc.h in native builds even if it's available
+      fi
+      # other possible options: --enable-openssl [unneeded since we already use gnutls]
     fi
 
     do_debug_build=n # if you need one for backtraces/examining segfaults using gdb.exe ... change this to y :) XXXX make it affect x264 too...and make it real param :)
@@ -1919,7 +2425,7 @@ build_ffmpeg() {
 
     # XXX really ffmpeg should have set this up right but doesn't, patch FFmpeg itself instead...
     if [[ $1 == "static" ]]; then
-      if [[ $build_intel_qsv = y ]]; then
+      if [[ $build_intel_qsv = y  && $compiler_flavors != "native" ]]; then # Broken for native builds right now: https://github.com/lu-zero/mfx_dispatch/issues/71
         sed -i.bak 's/-lavutil -lm.*/-lavutil -lm -lmfx -lstdc++ -lpthread/' "$PKG_CONFIG_PATH/libavutil.pc"
       else
         sed -i.bak 's/-lavutil -lm.*/-lavutil -lm -lpthread/' "$PKG_CONFIG_PATH/libavutil.pc"
@@ -1942,24 +2448,32 @@ build_ffmpeg() {
         archive+="_legacy"
       fi
       if [[ $1 == "shared" ]]; then
-        echo "Done! You will find $bits_target-bit $1 binaries in $(pwd)/bin."
+        echo "Done! You will find $bits_target-bit $1 binaries in $(pwd)/bin"
+        # Some manual package stuff because the install_root may be cluttered with static as well...
+        # XXX this misses the docs and share?
         if [[ ! -f $archive.7z ]]; then
-          sed "s/$/\r/" COPYING.GPLv3 > bin/COPYING.GPLv3.txt
+          sed "s/$/\r/" COPYING.GPLv3 > bin/COPYING.GPLv3.txt # XXX we include this even if it's not a GPL build?
+          cp -r include bin
           cd bin
-            7z a -mx=9 $archive.7z *.exe *.dll COPYING.GPLv3.txt && rm -f COPYING.GPLv3.txt
+            7z a -mx=9 $archive.7z include *.exe *.dll *.lib COPYING.GPLv3.txt && rm -f COPYING.GPLv3.txt
           cd ..
         fi
       else
-        echo "Done! You will find $bits_target-bit $1 binaries in $(pwd)."
+        echo "Done! You will find $bits_target-bit $1 binaries in $(pwd)"
         if [[ ! -f $archive.7z ]]; then
           sed "s/$/\r/" COPYING.GPLv3 > COPYING.GPLv3.txt
           7z a -mx=9 $archive.7z ffmpeg.exe ffplay.exe ffprobe.exe COPYING.GPLv3.txt && rm -f COPYING.GPLv3.txt
         fi
       fi
-      echo "You will find redistributable archives in $cur_dir/redist."
+      echo "You will find redistributable archive .7z file in $cur_dir/redist"
     fi
     echo `date`
-  cd ..
+
+  if [[ -z $ffmpeg_source_dir ]]; then
+    cd ..
+  else
+    cd "$work_dir"
+  fi
 }
 
 build_lsw() {
@@ -1982,7 +2496,7 @@ build_lsw() {
 find_all_build_exes() {
   local found=""
 # NB that we're currently in the sandbox dir...
-  for file in `find . -name ffmpeg.exe` `find . -name ffmpeg_g.exe` `find . -name ffplay.exe` `find . -name MP4Box.exe` `find . -name mplayer.exe` `find . -name mencoder.exe` `find . -name avconv.exe` `find . -name avprobe.exe` `find . -name x264.exe` `find . -name writeavidmxf.exe` `find . -name writeaviddv50.exe` `find . -name rtmpdump.exe` `find . -name x265.exe` `find . -name ismindex.exe` `find . -name dvbtee.exe` `find . -name boxdumper.exe` `find . -name muxer.exe ` `find . -name remuxer.exe` `find . -name timelineeditor.exe` `find . -name lwcolor.auc` `find . -name lwdumper.auf` `find . -name lwinput.aui` `find . -name lwmuxer.auf` `find . -name vslsmashsource.dll`; do
+  for file in `find . -name ffmpeg.exe` `find . -name ffmpeg_g.exe` `find . -name ffplay.exe` `find . -name ffmpeg` `find . -name ffplay` `find . -name ffprobe` `find . -name MP4Box.exe` `find . -name mplayer.exe` `find . -name mencoder.exe` `find . -name avconv.exe` `find . -name avprobe.exe` `find . -name x264.exe` `find . -name writeavidmxf.exe` `find . -name writeaviddv50.exe` `find . -name rtmpdump.exe` `find . -name x265.exe` `find . -name ismindex.exe` `find . -name dvbtee.exe` `find . -name boxdumper.exe` `find . -name muxer.exe ` `find . -name remuxer.exe` `find . -name timelineeditor.exe` `find . -name lwcolor.auc` `find . -name lwdumper.auf` `find . -name lwinput.aui` `find . -name lwmuxer.auf` `find . -name vslsmashsource.dll`; do
     found="$found $(readlink -f $file)"
   done
 
@@ -1994,11 +2508,24 @@ find_all_build_exes() {
 }
 
 build_ffmpeg_dependencies() {
-  echo "Building ffmpeg dependency libraries..." 
+  if [[ $build_dependencies = "n" ]]; then
+    echo "Skip build ffmpeg dependency libraries..."
+    return
+  fi
+
+  echo "Building ffmpeg dependency libraries..."
   if [[ $compiler_flavors != "native" ]]; then # build some stuff that don't build native...
     build_dlfcn
     build_libxavs
   fi
+
+  build_libdavs2
+  if [[ $host_target != 'i686-w64-mingw32' ]]; then
+    build_libxavs2
+  fi
+
+  build_meson_cross
+  build_mingw_std_threads
   build_zlib # Zlib in FFmpeg is autodetected.
   build_libcaca # Uses zlib and dlfcn (on windows).
   build_bzip2 # Bzlib (bzip2) in FFmpeg is autodetected.
@@ -2008,22 +2535,28 @@ build_ffmpeg_dependencies() {
   if [[ $build_amd_amf = y ]]; then
     build_amd_amf_headers
   fi
-  if [[ $build_intel_qsv = y ]]; then
+  if [[ $build_intel_qsv = y && $compiler_flavors != "native" ]]; then # Broken for native builds right now: https://github.com/lu-zero/mfx_dispatch/issues/71
     build_intel_quicksync_mfx
   fi
   build_nv_headers
   build_libzimg # Uses dlfcn.
   build_libopenjpeg
+  build_glew
+  build_glfw
   #build_libjpeg_turbo # mplayer can use this, VLC qt might need it? [replaces libjpeg] (ffmpeg seems to not need it so commented out here)
   build_libpng # Needs zlib >= 1.0.4. Uses dlfcn.
   build_libwebp # Uses dlfcn.
-  build_freetype # Uses zlib, bzip2, and libpng.
+  build_harfbuzz
+  # harf does now include build_freetype # Uses zlib, bzip2, and libpng.
   build_libxml2 # Uses zlib, liblzma, iconv and dlfcn.
+  build_libvmaf
   build_fontconfig # Needs freetype and libxml >= 2.6. Uses iconv and dlfcn.
   build_gmp # For rtmp support configure FFmpeg with '--enable-gmp'. Uses dlfcn.
-  #build_librtmfp
+  #build_librtmfp # mainline ffmpeg doesn't use it yet
   build_libnettle # Needs gmp >= 3.0. Uses dlfcn.
-  build_gnutls # Needs nettle >= 3.1, hogweed (nettle) >= 3.1. Uses zlib and dlfcn.
+  build_unistring
+  build_libidn2 # needs iconv and unistring
+  build_gnutls # Needs nettle >= 3.1, hogweed (nettle) >= 3.1. Uses libidn2, unistring, zlib, and dlfcn.
   #if [[ "$non_free" = "y" ]]; then
   #  build_openssl-1.0.2 # Nonfree alternative to GnuTLS. 'build_openssl-1.0.2 "dllonly"' to build shared libraries only.
   #  build_openssl-1.1.1 # Nonfree alternative to GnuTLS. Can't be used with LibRTMP. 'build_openssl-1.1.1 "dllonly"' to build shared libraries only.
@@ -2050,18 +2583,28 @@ build_ffmpeg_dependencies() {
   build_fftw # Uses dlfcn.
   build_libsamplerate # Needs libsndfile >= 1.0.6 and fftw >= 0.15.0 for tests. Uses dlfcn.
   build_librubberband # Needs libsamplerate, libsndfile, fftw and vamp_plugin. 'configure' will fail otherwise. Eventhough librubberband doesn't necessarily need them (libsndfile only for 'rubberband.exe' and vamp_plugin only for "Vamp audio analysis plugin"). How to use the bundled libraries '-DUSE_SPEEX' and '-DUSE_KISSFFT'?
-  build_frei0r # Needs dlfcn.
+  build_frei0r # Needs dlfcn. could use opencv...
+  if [ "$bits_target" != "32" ]; then
+    build_svt-hevc
+    build_svt-av1
+    build_svt-vp9
+  fi
   build_vidstab
+  #build_facebooktransform360 # needs modified ffmpeg to use it
   build_libmysofa # Needed for FFmpeg's SOFAlizer filter (https://ffmpeg.org/ffmpeg-filters.html#sofalizer). Uses dlfcn.
   if [[ "$non_free" = "y" ]]; then
     build_fdk-aac # Uses dlfcn.
-    build_libdecklink
+    if [[ $compiler_flavors != "native" ]]; then
+      build_libdecklink # Error finding rpc.h in native builds even if it's available
+    fi
   fi
   build_zvbi # Uses iconv, libpng and dlfcn.
   build_fribidi # Uses dlfcn.
   build_libass # Needs freetype >= 9.10.3 (see https://bugs.launchpad.net/ubuntu/+source/freetype1/+bug/78573 o_O) and fribidi >= 0.19.0. Uses fontconfig >= 2.10.92, iconv and dlfcn.
 
   build_libxvid # FFmpeg now has native support, but libxvid still provides a better image.
+  build_libsrt # requires gnutls, mingw-std-threads
+  build_libaribb24
   build_libtesseract
   build_lensfun  # requires png, zlib, iconv
   # build_libtensorflow # broken
@@ -2069,8 +2612,10 @@ build_ffmpeg_dependencies() {
   build_libx265
   build_libopenh264
   build_libaom
+  build_dav1d
+  build_avisynth
   build_libx264 # at bottom as it might internally build a coy of ffmpeg (which needs all the above deps...
-}
+ }
 
 build_apps() {
   if [[ $build_dvbtee = "y" ]]; then
@@ -2101,6 +2646,7 @@ build_apps() {
 }
 
 # set some parameters initial values
+top_dir="$(pwd)"
 cur_dir="$(pwd)/sandbox"
 patch_dir="$(pwd)/patches"
 cpu_count="$(grep -c processor /proc/cpuinfo 2>/dev/null)" # linux cpu count
@@ -2126,11 +2672,6 @@ else
   gcc_cpu_count=1 # compatible low RAM...
 fi
 
-if [[ $OSTYPE == "darwin17" ]]; then
-  echo "high sierra detected, so using only one cpu for gcc compilation" # until #326 fixable...
-  gcc_cpu_count=1 
-fi
-
 # variables with their defaults
 build_ffmpeg_static=y
 build_ffmpeg_shared=n
@@ -2140,12 +2681,14 @@ build_mp4box=n
 build_mplayer=n
 build_vlc=n
 build_lsw=n # To build x264 with L-Smash-Works.
+build_dependencies=y
 git_get_latest=y
 prefer_stable=y # Only for x264 and x265.
 build_intel_qsv=y # note: not windows xp friendly!
 build_amd_amf=y
 disable_nonfree=y # comment out to force user y/n selection
 original_cflags='-mtune=generic -O3' # high compatible by default, see #219, some other good options are listed below, or you could use -march=native to target your local box:
+original_cppflags='-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0' # Needed for mingw-w64 7 as FORTIFY_SOURCE is now partially implemented, but not actually working
 # if you specify a march it needs to first so x264's configure will use it :| [ is that still the case ?]
 
 #flags=$(cat /proc/cpuinfo | grep flags)
@@ -2164,6 +2707,8 @@ ffmpeg_git_checkout_version=
 build_ismindex=n
 enable_gpl=y
 build_x264_with_libav=n # To build x264 with Libavformat.
+ffmpeg_git_checkout="https://github.com/FFmpeg/FFmpeg.git"
+ffmpeg_source_dir=
 
 # parse command line parameters, if any
 while true; do
@@ -2172,6 +2717,10 @@ while true; do
       --build-ffmpeg-static=y  (ffmpeg.exe, ffplay.exe and ffprobe.exe)
       --build-ffmpeg-shared=n  (ffmpeg.exe (with libavformat-x.dll, etc., ffplay.exe, ffprobe.exe and dll-files)
       --ffmpeg-git-checkout-version=[master] if you want to build a particular version of FFmpeg, ex: n3.1.1 or a specific git hash
+      --ffmpeg-git-checkout=[https://github.com/FFmpeg/FFmpeg.git] if you want to clone FFmpeg from other repositories
+      --ffmpeg-source-dir=[default empty] specifiy the directory of ffmpeg source code. When specified, git will not be used.
+      --x265-git-checkout-version=[master] if you want to build a particular version of x265, ex: --x265-git-checkout-version=Release_3.2 or a specific git hash
+      --fdk-aac-git-checkout-version= if you want to build a particular version of fdk-aac, ex: --fdk-aac-git-checkout-version=v2.0.1 or another tag
       --gcc-cpu-count=[number of cpu cores set it higher than 1 if you have multiple cores and > 1GB RAM, this speeds up initial cross compiler build. FFmpeg build uses number of cores no matter what]
       --disable-nonfree=y (set to n to include nonfree like libfdk-aac,decklink)
       --build-intel-qsv=y (set to y to include the [non windows xp compat.] qsv library and ffmpeg module. NB this not not hevc_qsv...
@@ -2190,13 +2739,17 @@ while true; do
       --git-get-latest=y [do a git pull for latest code from repositories like FFmpeg--can force a rebuild if changes are detected]
       --build-x264-with-libav=n build x264.exe with bundled/included "libav" ffmpeg libraries within it
       --prefer-stable=y build a few libraries from releases instead of git master
-      --high-bitdepth=n Enable high bit depth for x264 (10 bits) and x265 (10 and 12 bits, x64 build. Not officially supported on x86 (win32), but enabled by disabling its assembly).
       --debug Make this script  print out each line as it executes
       --enable-gpl=[y] set to n to do an lgpl build
+      --build-dependencies=y [builds the ffmpeg dependencies. Disable it when the dependencies was built once and can greatly reduce build time. ]
        "; exit 0 ;;
     --sandbox-ok=* ) sandbox_ok="${1#*=}"; shift ;;
     --gcc-cpu-count=* ) gcc_cpu_count="${1#*=}"; shift ;;
     --ffmpeg-git-checkout-version=* ) ffmpeg_git_checkout_version="${1#*=}"; shift ;;
+    --ffmpeg-git-checkout=* ) ffmpeg_git_checkout="${1#*=}"; shift ;;
+    --ffmpeg-source-dir=* ) ffmpeg_source_dir="${1#*=}"; shift ;;
+    --x265-git-checkout-version=* ) x265_git_checkout_version="${1#*=}"; shift ;;
+    --fdk-aac-git-checkout-version=* ) fdk_aac_git_checkout_version="${1#*=}"; shift ;;
     --build-libmxf=* ) build_libmxf="${1#*=}"; shift ;;
     --build-mp4box=* ) build_mp4box="${1#*=}"; shift ;;
     --build-ismindex=* ) build_ismindex="${1#*=}"; shift ;;
@@ -2212,13 +2765,12 @@ while true; do
     --build-dvbtee=* ) build_dvbtee="${1#*=}"; shift ;;
     --disable-nonfree=* ) disable_nonfree="${1#*=}"; shift ;;
     # this doesn't actually "build all", like doesn't build 10 high-bit LGPL ffmpeg, but it does exercise the "non default" type build options...
-    -a         ) compiler_flavors="multi"; build_mplayer=y; build_libmxf=y; build_mp4box=y; build_vlc=y; build_lsw=y; 
-                 high_bitdepth=y; build_ffmpeg_static=y; build_ffmpeg_shared=y; build_lws=y;
-                 disable_nonfree=n; git_get_latest=y; sandbox_ok=y; build_amd_amf=y; build_intel_qsv=y; 
-                 build_dvbtee=y; build_x264_with_libav=y; shift ;;
-    -d         ) gcc_cpu_count=$cpu_count; disable_nonfree="y"; sandbox_ok="y"; compiler_flavors="win32"; git_get_latest="n"; shift ;;
-    --compiler-flavors=* ) 
-         compiler_flavors="${1#*=}"; 
+    -a         ) compiler_flavors="multi"; build_mplayer=n; build_libmxf=y; build_mp4box=y; build_vlc=y; build_lsw=y;
+                 build_ffmpeg_static=y; build_ffmpeg_shared=y; build_lws=y; disable_nonfree=n; git_get_latest=y;
+                 sandbox_ok=y; build_amd_amf=y; build_intel_qsv=y; build_dvbtee=y; build_x264_with_libav=y; shift ;;
+    -d         ) gcc_cpu_count=$cpu_count; disable_nonfree="y"; sandbox_ok="y"; compiler_flavors="win64"; git_get_latest="n"; shift ;;
+    --compiler-flavors=* )
+         compiler_flavors="${1#*=}";
          if [[ $compiler_flavors == "native" && $OSTYPE == darwin* ]]; then
            build_intel_qsv=n
            echo "disabling qsv since os x"
@@ -2228,7 +2780,7 @@ while true; do
     --build-ffmpeg-shared=* ) build_ffmpeg_shared="${1#*=}"; shift ;;
     --prefer-stable=* ) prefer_stable="${1#*=}"; shift ;;
     --enable-gpl=* ) enable_gpl="${1#*=}"; shift ;;
-    --high-bitdepth=* ) high_bitdepth="${1#*=}"; shift ;;
+    --build-dependencies=* ) build_dependencies="${1#*=}"; shift ;;
     --debug ) set -x; shift ;;
     -- ) shift; break ;;
     -* ) echo "Error, unknown option: '$1'."; exit 1 ;;
@@ -2237,6 +2789,7 @@ while true; do
 done
 
 reset_cflags # also overrides any "native" CFLAGS, which we may need if there are some 'linux only' settings in there
+reset_cppflags # Ensure CPPFLAGS are cleared and set to what is configured
 check_missing_packages # do this first since it's annoying to go through prompts then be rejected
 intro # remember to always run the intro, since it adjust pwd
 install_cross_compiler
@@ -2262,16 +2815,26 @@ original_path="$PATH"
 
 if [[ $compiler_flavors == "native" ]]; then
   echo "starting native build..."
-  mingw_w64_x86_64_prefix="$cur_dir/cross_compilers/native"
-  mingw_bin_path="$cur_dir/cross_compilers/native/bin" # sdl needs somewhere to drop "binaries"??
+  # realpath so if you run it from a different symlink path it doesn't rebuild the world...
+  # mkdir required for realpath first time
+  mkdir -p $cur_dir/cross_compilers/native
+  mkdir -p $cur_dir/cross_compilers/native/bin
+  mingw_w64_x86_64_prefix="$(realpath $cur_dir/cross_compilers/native)"
+  mingw_bin_path="$(realpath $cur_dir/cross_compilers/native/bin)" # sdl needs somewhere to drop "binaries"??
   export PKG_CONFIG_PATH="$mingw_w64_x86_64_prefix/lib/pkgconfig"
   export PATH="$mingw_bin_path:$original_path"
   make_prefix_options="PREFIX=$mingw_w64_x86_64_prefix"
+  if [[ $(uname -m) =~ 'i686' ]]; then
+    bits_target=32
+  else
+    bits_target=64
+  fi
   #  bs2b doesn't use pkg-config, sndfile needed Carbon :|
   export CPATH=$cur_dir/cross_compilers/native/include:/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/Carbon.framework/Versions/A/Headers # C_INCLUDE_PATH
   export LIBRARY_PATH=$cur_dir/cross_compilers/native/lib
-  mkdir -p native
-  cd native
+  work_dir="$(realpath $cur_dir/native)"
+  mkdir -p "$work_dir"
+  cd "$work_dir"
     build_ffmpeg_dependencies
     build_ffmpeg
   cd ..
@@ -2281,15 +2844,18 @@ if [[ $compiler_flavors == "multi" || $compiler_flavors == "win32" ]]; then
   echo
   echo "Starting 32-bit builds..."
   host_target='i686-w64-mingw32'
-  mingw_w64_x86_64_prefix="$cur_dir/cross_compilers/mingw-w64-i686/$host_target"
-  mingw_bin_path="$cur_dir/cross_compilers/mingw-w64-i686/bin"
+  mkdir -p $cur_dir/cross_compilers/mingw-w64-i686/$host_target
+  mingw_w64_x86_64_prefix="$(realpath $cur_dir/cross_compilers/mingw-w64-i686/$host_target)"
+  mkdir -p $cur_dir/cross_compilers/mingw-w64-i686/bin
+  mingw_bin_path="$(realpath $cur_dir/cross_compilers/mingw-w64-i686/bin)"
   export PKG_CONFIG_PATH="$mingw_w64_x86_64_prefix/lib/pkgconfig"
   export PATH="$mingw_bin_path:$original_path"
   bits_target=32
   cross_prefix="$mingw_bin_path/i686-w64-mingw32-"
   make_prefix_options="CC=${cross_prefix}gcc AR=${cross_prefix}ar PREFIX=$mingw_w64_x86_64_prefix RANLIB=${cross_prefix}ranlib LD=${cross_prefix}ld STRIP=${cross_prefix}strip CXX=${cross_prefix}g++"
-  mkdir -p win32
-  cd win32
+  work_dir="$(realpath $cur_dir/win32)"
+  mkdir -p "$work_dir"
+  cd "$work_dir"
     build_ffmpeg_dependencies
     build_apps
   cd ..
@@ -2299,15 +2865,18 @@ if [[ $compiler_flavors == "multi" || $compiler_flavors == "win64" ]]; then
   echo
   echo "**************Starting 64-bit builds..." # make it have a bit easier to you can see when 32 bit is done
   host_target='x86_64-w64-mingw32'
-  mingw_w64_x86_64_prefix="$cur_dir/cross_compilers/mingw-w64-x86_64/$host_target"
-  mingw_bin_path="$cur_dir/cross_compilers/mingw-w64-x86_64/bin"
+  mkdir -p $cur_dir/cross_compilers/mingw-w64-x86_64/$host_target
+  mingw_w64_x86_64_prefix="$(realpath $cur_dir/cross_compilers/mingw-w64-x86_64/$host_target)"
+  mkdir -p $cur_dir/cross_compilers/mingw-w64-x86_64/bin
+  mingw_bin_path="$(realpath $cur_dir/cross_compilers/mingw-w64-x86_64/bin)"
   export PKG_CONFIG_PATH="$mingw_w64_x86_64_prefix/lib/pkgconfig"
   export PATH="$mingw_bin_path:$original_path"
   bits_target=64
   cross_prefix="$mingw_bin_path/x86_64-w64-mingw32-"
   make_prefix_options="CC=${cross_prefix}gcc AR=${cross_prefix}ar PREFIX=$mingw_w64_x86_64_prefix RANLIB=${cross_prefix}ranlib LD=${cross_prefix}ld STRIP=${cross_prefix}strip CXX=${cross_prefix}g++"
-  mkdir -p win64
-  cd win64
+  work_dir="$(realpath $cur_dir/win64)"
+  mkdir -p "$work_dir"
+  cd "$work_dir"
     build_ffmpeg_dependencies
     build_apps
   cd ..

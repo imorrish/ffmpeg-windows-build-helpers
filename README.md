@@ -4,9 +4,9 @@ ffmpeg-windows-build-helpers
 This helper script lets you cross compile a windows-based 32 or 64-bit version of ffmpeg/mplayer/mp4box.exe, etc,  including their dependencies and libraries that they use.
 Note that I do offer custom builds, price negotiable. Ping me at rogerdpack@gmail.com and I'll do the work for you :) 
 
-The script allows the user to either build on Windows via cygwin (as documented below), or on a Linux host (which uses cross compiles to build windows binaries).
+The script allows the user to either build on a Linux host (which uses cross compiles to build windows binaries).  Windows users can use windows bash or virtualbox.
 Building on linux takes less time overall. On Windows 10, you can use the bash shell (provided that you've installed the Windows Subsystem for Linux as explained [here](http://www.howtogeek.com/249966/how-to-install-and-use-the-linux-bash-shell-on-windows-10/).
-Building in windows takes considerably longer but avoids the need of deploying a  Linux installation for the same purpose.
+Building in windows takes longer but avoids the need of deploying a  Linux installation for the same purpose.
 I do have some "distribution release builds" of running the script here: https://sourceforge.net/projects/ffmpegwindowsbi/files
 
 **Cross-compiling from a Linux environment:**
@@ -29,7 +29,7 @@ It should end up with a working, statically-built ffmpeg.exe binary within the "
 
 Another option instead of running `./cross_compile_ffmpeg.sh` is to run 
 
-    $ native_build/quick_cross_compile_ffmpeg_fdk_aac_and_x264_using_packaged_mingw64.sh script.
+    $ quick_build/quick_cross_compile_ffmpeg_fdk_aac_and_x264_using_packaged_mingw64.sh script.
 
 Note the "quick" part here which attempts to use the locally installed `mingw-w64` package from your distribution for the cross compiler, thus skipping the time-intensive cross-compiler toolchain build step.  It's not as well tested as running the normal one, however, which builds gcc from scratch.
 
@@ -98,6 +98,4 @@ Related projects (that do cross compiling with dependency libraries):
   mxe "m cross environment" https://github.com/mxe/mxe is a library for cross compiling many things, including FFmpeg I believe.
 
 [1] if you use a 512MB RAM droplet, make sure to first add some extra swap space: https://www.digitalocean.com/community/tutorials/how-to-add-swap-on-ubuntu-14-04 before starting.  
-Here's my digitalocean referral link in case you want it [you get $10 free credit] https://www.digitalocean.com/?refcode=b3030b559d17
-
-
+Here's my vultr referral link in case you want it [you get $100 free credit] https://www.vultr.com/?ref=8518257-6G
